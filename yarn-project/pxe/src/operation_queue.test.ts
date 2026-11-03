@@ -255,6 +255,26 @@ describe('OperationQueue', () => {
       expect(discarded).toEqual([]);
     });
 
+    it('logs an interruption at verbose and never at error', async () => {
+      const log = mock<Logger>();
+      // A plain `AbortError` with `errorContext` set is the path where a regression would log at error.
+      const interrupted = makeQueue([], log).runSynced(
+        ({ signal }) => {
+          controller.abort(reason);
+          throwAbortErrorIfAborted(signal);
+          return Promise.resolve();
+        },
+        { signal: controller.signal, errorContext: () => ['context'] },
+      );
+
+      await expect(interrupted).rejects.toBe(reason);
+      expect(log.error).not.toHaveBeenCalled();
+      expect(log.verbose).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ eventName: 'pxe_operation_interrupted' }),
+      );
+    });
+
     it('returns any reason by identity', async () => {
       const selfCaused = new Error('self-caused');
       selfCaused.cause = selfCaused;
@@ -274,7 +294,7 @@ describe('OperationQueue', () => {
     });
   });
 
-  function makeQueue(contributors: OperationContributor[] = []) {
+  function makeQueue(contributors: OperationContributor[] = [], log: Logger = mockLog) {
     const queue = new OperationQueue({
       node,
       synchronizer,
@@ -282,7 +302,7 @@ describe('OperationQueue', () => {
       stagedWriteCoordinator: coordinator,
       contributors,
       autoSync: false,
-      log: mockLog,
+      log,
     });
     queue.start();
     return queue;
