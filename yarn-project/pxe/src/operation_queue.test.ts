@@ -6,6 +6,7 @@ import { openTmpStore } from '@aztec-labs/kv-store/lmdb-v2';
 import { SimulationError } from '@aztec-labs/stdlib/errors';
 import { BlockHeader } from '@aztec-labs/stdlib/tx';
 import { type MockProxy, mock } from 'jest-mock-extended';
+import { getEventListeners } from 'node:events';
 
 import type { BlockSynchronizer } from './block_synchronizer/index.js';
 import type { Recording } from './node/benchmarked_node.js';
@@ -205,6 +206,13 @@ describe('OperationQueue', () => {
       const independent = new Error('independent failure');
       const cyclic = new Error('cyclic failure');
       cyclic.cause = cyclic;
+      // Its `cause` getter throws the reason itself, which must not pass for an interruption.
+      const uninspectable = new Error('uninspectable failure');
+      Object.defineProperty(uninspectable, 'cause', {
+        get: () => {
+          throw reason;
+        },
+      });
       const settleFailure = new Error('settle failed', { cause: new AbortError('another operation') });
       const commitFailure = new Error('commit failed', { cause: new AbortError('another operation') });
       const abortAndFail = (failure: Error) => () => {
@@ -212,7 +220,7 @@ describe('OperationQueue', () => {
         return Promise.reject(failure);
       };
 
-      for (const failure of [independent, cyclic]) {
+      for (const failure of [independent, cyclic, uninspectable]) {
         controller = new AbortController();
         await expect(makeQueue().runSynced(abortAndFail(failure), { signal: controller.signal })).rejects.toBe(failure);
       }
@@ -275,22 +283,45 @@ describe('OperationQueue', () => {
       );
     });
 
-    it('returns any reason by identity', async () => {
+    it('returns any reason by identity, whether the work stops at a checkpoint or rejects with the reason', async () => {
       const selfCaused = new Error('self-caused');
       selfCaused.cause = selfCaused;
-
-      for (const oddReason of ['closed', NaN, selfCaused]) {
-        controller = new AbortController();
-        const interrupted = makeQueue().runSynced(
-          ({ signal }) => {
-            controller.abort(oddReason);
-            throwAbortErrorIfAborted(signal);
-            return Promise.resolve();
+      const hostile = new Proxy(
+        {},
+        {
+          getPrototypeOf: () => {
+            throw new Error('hostile reason');
           },
-          { signal: controller.signal },
-        );
-        await expect(interrupted).rejects.toBe(oddReason);
+        },
+      );
+
+      for (const oddReason of ['closed', NaN, selfCaused, hostile]) {
+        for (const rejectWithReason of [false, true]) {
+          controller = new AbortController();
+          const interrupted = makeQueue().runSynced(
+            ({ signal }) => {
+              controller.abort(oddReason);
+              if (rejectWithReason) {
+                return Promise.reject(signal?.reason);
+              }
+              throwAbortErrorIfAborted(signal);
+              return Promise.resolve();
+            },
+            { signal: controller.signal },
+          );
+          await expect(interrupted).rejects.toBe(oddReason);
+        }
       }
+    });
+
+    it('leaves no abort listener behind when the operation cannot be enqueued', async () => {
+      const queue = makeQueue();
+      await queue.stop();
+
+      await expect(queue.runSynced(() => Promise.resolve(), { signal: controller.signal })).rejects.toThrow(
+        'Could not enqueue',
+      );
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
   });
 

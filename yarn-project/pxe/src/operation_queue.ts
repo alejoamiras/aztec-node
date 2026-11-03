@@ -123,8 +123,8 @@ export class OperationQueue {
    *
    * When `signal` aborts, the call rejects with `signal.reason`. A queued operation is rejected at once and never runs.
    * A running one stops at its next checkpoint and discards its staged writes; the queue moves on only once its work
-   * has stopped, which includes node requests and contributor work already in flight. An abort after the commit has
-   * started has no effect.
+   * has stopped, which includes node requests and contributor work already in flight. A failure other than the
+   * interruption keeps its own error, and an abort after the commit has started has no effect.
    */
   public runSynced<T>(
     fn: (ctx: SyncedOperationContext) => Promise<T>,
@@ -164,7 +164,7 @@ export class OperationQueue {
           } catch (err) {
             // The work stops with a cause-less `AbortError` rather than `signal.reason`: private execution assigns
             // `message` on the errors that cross it, which a `DOMException` reason forbids, and the simulator walks
-            // `cause` chains without a cycle guard. The caller gets its own reason back here.
+            // `cause` chains without a cycle guard.
             throw signal && isInterruption(err, signal) ? signal.reason : err;
           }
         });
@@ -192,10 +192,14 @@ export class OperationQueue {
     const rejectQueued = () => caller.reject(signal.reason);
     signal.addEventListener('abort', rejectQueued, { once: true });
     this.run(() => {
+      // Removed before any await: once the work runs, an abort must stop it at a checkpoint rather than reject the
+      // caller while the work still holds the queue.
       signal.removeEventListener('abort', rejectQueued);
       // Aborted while queued: the caller is already rejected, so the operation must not start.
       return signal.aborted ? Promise.reject(signal.reason) : job();
-    }).then(caller.resolve, caller.reject);
+    })
+      .then(caller.resolve, caller.reject)
+      .finally(() => signal.removeEventListener('abort', rejectQueued));
     return caller.promise;
   }
 
@@ -216,8 +220,9 @@ export class OperationQueue {
 
 /**
  * Whether `err` means the work stopped because `signal` aborted: the signal has aborted, and `err` or an error in its
- * `cause` chain is an `AbortError` or the signal's reason itself. The walk tolerates cycles and never reads the
- * reason's own `cause`.
+ * `cause` chain is the signal's reason itself or an `AbortError`. The walk tolerates cycles, never inspects the
+ * reason, and treats an error it cannot inspect (a throwing `cause` getter or proxy trap) as not an interruption, so
+ * the original failure is kept.
  */
 function isInterruption(err: unknown, signal: AbortSignal): boolean {
   if (!signal.aborted) {
@@ -225,15 +230,19 @@ function isInterruption(err: unknown, signal: AbortSignal): boolean {
   }
   const seen = new Set<unknown>();
   let current = err;
-  while (!seen.has(current)) {
-    if (current instanceof AbortError || Object.is(current, signal.reason)) {
-      return true;
+  try {
+    while (!seen.has(current)) {
+      if (Object.is(current, signal.reason) || current instanceof AbortError) {
+        return true;
+      }
+      if (typeof current !== 'object' || current === null || !('cause' in current)) {
+        return false;
+      }
+      seen.add(current);
+      current = current.cause;
     }
-    if (typeof current !== 'object' || current === null || !('cause' in current)) {
-      return false;
-    }
-    seen.add(current);
-    current = current.cause;
+  } catch {
+    return false;
   }
   return false;
 }
