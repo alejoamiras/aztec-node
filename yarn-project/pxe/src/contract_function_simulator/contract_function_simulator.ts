@@ -139,6 +139,8 @@ export type ContractSimulatorRunOpts = {
   scopes: AztecAddress[];
   /** The change set ID for staged writes. */
   changeSetId: ChangeSetId;
+  /** When it aborts, the run stops before the next private function and rejects with an `AbortError` in its causes. */
+  signal?: AbortSignal;
 };
 
 /** Args for ContractFunctionSimulator constructor. */
@@ -222,6 +224,7 @@ export class ContractFunctionSimulator {
       senderForTags,
       scopes,
       changeSetId,
+      signal,
     }: ContractSimulatorRunOpts,
   ): Promise<PrivateExecutionResult> {
     const simulatorSetupTimer = new Timer();
@@ -313,6 +316,7 @@ export class ContractFunctionSimulator {
       l2TipsStore: this.l2TipsStore,
       hooks: this.hooks,
       transientArrayService,
+      signal,
     });
 
     const setupTime = simulatorSetupTimer.ms();

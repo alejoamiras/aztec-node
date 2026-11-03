@@ -7,6 +7,7 @@ import { randomInt } from '@aztec-labs/foundation/crypto/random';
 import { sha256ToField } from '@aztec-labs/foundation/crypto/sha256';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
 import { GrumpkinScalar } from '@aztec-labs/foundation/curves/grumpkin';
+import { AbortError } from '@aztec-labs/foundation/error';
 import { EthAddress } from '@aztec-labs/foundation/eth-address';
 import { type Logger, createLogger } from '@aztec-labs/foundation/log';
 import type { FieldsOf } from '@aztec-labs/foundation/types';
@@ -17,7 +18,7 @@ import { ParentContractArtifact } from '@aztec-labs/noir-test-contracts.js/Paren
 import { PendingNoteHashesContractArtifact } from '@aztec-labs/noir-test-contracts.js/PendingNoteHashes';
 import { StatefulTestContractArtifact } from '@aztec-labs/noir-test-contracts.js/StatefulTest';
 import { TestContractArtifact } from '@aztec-labs/noir-test-contracts.js/Test';
-import { WASMSimulator } from '@aztec-labs/simulator/client';
+import { WASMSimulator, traverseCauseChain } from '@aztec-labs/simulator/client';
 import { HandshakeRegistryArtifact } from '@aztec-labs/standard-contracts/handshake-registry';
 import { STANDARD_HANDSHAKE_REGISTRY_ADDRESS } from '@aztec-labs/standard-contracts/handshake-registry/constants';
 import {
@@ -36,6 +37,7 @@ import {
   getContractClassFromArtifact,
   getContractInstanceFromInstantiationParams,
 } from '@aztec-labs/stdlib/contract';
+import { SimulationError } from '@aztec-labs/stdlib/errors';
 import { Gas, GasFees, GasSettings } from '@aztec-labs/stdlib/gas';
 import { computeNoteHashNonce, computeSecretHash, computeUniqueNoteHash, siloNoteHash } from '@aztec-labs/stdlib/hash';
 import type { AztecNode } from '@aztec-labs/stdlib/interfaces/client';
@@ -184,6 +186,7 @@ describe('Private Execution test suite', () => {
     msgSender = AztecAddress.NULL_MSG_SENDER,
     contractAddress = undefined,
     txContext = {},
+    signal,
   }: {
     artifact: ContractArtifact;
     functionName: string;
@@ -192,6 +195,7 @@ describe('Private Execution test suite', () => {
     contractAddress?: AztecAddress;
     args?: any[];
     txContext?: Partial<FieldsOf<TxContext>>;
+    signal?: AbortSignal;
   }) => {
     const functionArtifact = getFunctionArtifactByName(artifact, functionName);
     contractAddress = contractAddress ?? (await mockContractInstance(artifact));
@@ -216,6 +220,7 @@ describe('Private Execution test suite', () => {
       senderForTags,
       changeSetId: TEST_CHANGE_SET_ID,
       scopes: [owner, senderForTags],
+      signal,
     });
   };
 
@@ -739,6 +744,49 @@ describe('Private Execution test suite', () => {
       expect(result.publicInputs.privateCallRequests.array[0].callContext).toEqual(
         result.nestedExecutionResults[0].publicInputs.callContext,
       );
+    });
+
+    it('stops before the child circuit when the signal aborts while the child contract syncs', async () => {
+      const childArtifact = getFunctionArtifactByName(ChildContractArtifact, 'value');
+      const parentAddress = await mockContractInstance(ParentContractArtifact);
+      const childAddress = await mockContractInstance(ChildContractArtifact);
+      const childSelector = await FunctionSelector.fromNameAndParameters(childArtifact.name, childArtifact.parameters);
+      const controller = new AbortController();
+      const syncContract = contractSyncService.ensureContractSynced.getMockImplementation()!;
+      contractSyncService.ensureContractSynced.mockImplementation(async args => {
+        await syncContract(args);
+        if (args.contract.equals(childAddress)) {
+          controller.abort();
+        }
+      });
+      const circuitsRun: string[] = [];
+      const executeUserCircuit = simulator.executeUserCircuit.bind(simulator);
+      const recordCircuits = jest
+        .spyOn(simulator, 'executeUserCircuit')
+        .mockImplementation((witness, artifact, callback) => {
+          circuitsRun.push(artifact.name);
+          return executeUserCircuit(witness, artifact, callback);
+        });
+
+      try {
+        const error = await runSimulator({
+          args: [childAddress, childSelector],
+          artifact: ParentContractArtifact,
+          anchorBlockHeader,
+          functionName: 'entry_point',
+          contractAddress: parentAddress,
+          signal: controller.signal,
+        }).catch(err => err);
+
+        expect(error).toBeInstanceOf(SimulationError);
+        const causes: Error[] = [];
+        traverseCauseChain(error, cause => causes.push(cause));
+        expect(causes.some(cause => cause instanceof AbortError)).toBe(true);
+        expect(circuitsRun).toContain('entry_point');
+        expect(circuitsRun).not.toContain('value');
+      } finally {
+        recordCircuits.mockRestore();
+      }
     });
 
     it('syncs private state for child in nested calls', async () => {

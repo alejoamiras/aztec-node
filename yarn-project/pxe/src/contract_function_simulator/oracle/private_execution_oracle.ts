@@ -1,5 +1,6 @@
 import { MAX_FR_CALLDATA_TO_ALL_ENQUEUED_CALLS, PRIVATE_CONTEXT_INPUTS_LENGTH } from '@aztec-labs/constants';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { createLogger } from '@aztec-labs/foundation/log';
 import { allToCompletion } from '@aztec-labs/foundation/promise';
 import { Timer } from '@aztec-labs/foundation/timer';
@@ -65,6 +66,8 @@ export type PrivateExecutionOracleArgs = UtilityExecutionOracleArgs & {
   totalPublicCalldataCount?: number;
   sideEffectCounter?: number;
   senderForTags?: AztecAddress;
+  /** When it aborts, execution stops before the next private function runs. Nested calls inherit it. */
+  signal?: AbortSignal;
 };
 
 /**
@@ -97,6 +100,7 @@ export class PrivateExecutionOracle extends UtilityExecutionOracle implements IP
   private readonly initialSideEffectCounter: number;
   /** Sender for tags passed in at oracle construction time. Returned by `getSenderForTags`. */
   private readonly defaultSenderForTags: AztecAddress | undefined;
+  public readonly signal: AbortSignal | undefined;
 
   constructor(args: PrivateExecutionOracleArgs) {
     super({
@@ -113,6 +117,7 @@ export class PrivateExecutionOracle extends UtilityExecutionOracle implements IP
     this.totalPublicCalldataCount = args.totalPublicCalldataCount ?? 0;
     this.initialSideEffectCounter = args.sideEffectCounter ?? 0;
     this.defaultSenderForTags = args.senderForTags;
+    this.signal = args.signal;
   }
 
   public getPrivateContextInputs(): PrivateContextInputs {
@@ -645,6 +650,7 @@ export class PrivateExecutionOracle extends UtilityExecutionOracle implements IP
       // instance of this class without a simulator.
       throw new Error('No simulator provided, cannot perform a nested private call');
     }
+    throwAbortErrorIfAborted(this.signal);
 
     const simulatorSetupTimer = new Timer();
     this.logger.debug(
@@ -713,6 +719,7 @@ export class PrivateExecutionOracle extends UtilityExecutionOracle implements IP
       hooks: this.hooks,
       l2TipsStore: this.l2TipsStore,
       transientArrayService: this.transientArrayService,
+      signal: this.signal,
     });
 
     const setupTime = simulatorSetupTimer.ms();
