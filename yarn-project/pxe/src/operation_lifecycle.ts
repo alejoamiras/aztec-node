@@ -46,6 +46,7 @@ export async function runOperation<T>(args: RunOperationArgs, fn: () => Promise<
     // Settling must stay outside the commit transaction: it can take arbitrarily long.
     await allToCompletion(contributors.map(contributor => contributor.settle?.(changeSetId)));
     // The cutoff: nothing may be awaited between this check and `commit`, or an abort in between would still commit.
+    // It throws the reason itself, unlike the checks inside the work, since nothing rewraps it before `runSynced`.
     signal?.throwIfAborted();
     log.verbose(`Committing operation ${changeSetId}`, { changeSetId });
 
