@@ -22,6 +22,17 @@ export class AbortError extends Error {
 }
 
 /**
+ * Throws a fresh {@link AbortError} with no `cause` if `signal` has aborted. Unlike `AbortSignal#throwIfAborted`, it
+ * never throws `signal.reason`, so the work it stops never carries a caller-controlled value; a caller that needs the
+ * reason maps the error back at its own boundary.
+ */
+export function throwAbortErrorIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new AbortError('Interrupted by caller');
+  }
+}
+
+/**
  * An error caused by the environment rather than by the request: a process that died or could not be started, or a
  * failed system call. Retrying may succeed. Satisfies {@link isRetryableError}.
  */

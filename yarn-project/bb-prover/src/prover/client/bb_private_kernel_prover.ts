@@ -3,7 +3,7 @@ import { serializeWitness } from '@aztec-foundation/noir-noirc_abi';
 import type { Abi, WitnessMap } from '@aztec-foundation/noir-types';
 
 import { getEnv } from '@aztec-labs/foundation/config/env';
-import { AbortError } from '@aztec-labs/foundation/error';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { type LogLevel, type Logger, createLogger } from '@aztec-labs/foundation/log';
 import { Timer } from '@aztec-labs/foundation/timer';
 import {
@@ -487,14 +487,14 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
     executionSteps: PrivateExecutionStep[],
     signal?: AbortSignal,
   ): Promise<ChonkProofWithPublicInputs> {
-    throwIfAborted(signal);
+    throwAbortErrorIfAborted(signal);
     const timer = new Timer();
     this.log.info(`Generating ClientIVC proof...`);
     const barretenberg = await Barretenberg.initSingleton({
       ...this.options,
       logger: this.options.logger?.verbose,
     });
-    throwIfAborted(signal);
+    throwAbortErrorIfAborted(signal);
     const backend = new AztecClientBackend(
       executionSteps.map(step => ungzip(step.bytecode)),
       barretenberg,
@@ -539,12 +539,5 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
     const backend = new AztecClientBackend([ungzip(_bytecode)], barretenberg, [_circuitName], [_circuitKind]);
     const gateCount = await backend.gates();
     return gateCount[0];
-  }
-}
-
-/** Throws a fresh, cause-less `AbortError` rather than `signal.reason`, which the caller maps back to the reason. */
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw new AbortError('Interrupted by caller');
   }
 }
