@@ -111,8 +111,10 @@ export type ProveTxOpts = {
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
   /**
-   * Interrupts the call when it aborts: it rejects with `signal.reason` and its staged writes are discarded. Private
-   * execution and kernel proving stop at their next checkpoint; the Chonk proof itself may still run to completion.
+   * Interrupts the call when it aborts before the operation commits: the call rejects with `signal.reason`, unless the
+   * work already failed with another error, and its staged writes are discarded. Private execution and kernel proving
+   * stop at their next checkpoint; the Chonk proof itself may still run to completion. An abort once the commit has
+   * started has no effect.
    */
   signal?: AbortSignal;
 };
@@ -164,8 +166,8 @@ export type SimulateAndProveTxOpts = SimulateTxOpts & {
     simulationResult: TxSimulationResult,
   ) => Promise<{ proveTxRequest: TxExecutionRequest; proveOpts: Omit<ProveTxOpts, 'signal'> }>;
   /**
-   * Interrupts the whole sequence when it aborts, as {@link ProveTxOpts.signal} does. No further tx data goes to the
-   * node once it has aborted, and no proof starts.
+   * Interrupts the whole sequence when it aborts, as {@link ProveTxOpts.signal} does. Once it has aborted, the public
+   * simulation and the validity check are not sent to the node, and no proof starts.
    */
   signal?: AbortSignal;
 };
