@@ -27,8 +27,9 @@ export interface OperationContributor {
  *
  * On success:
  * 1. Waits for every contributor to settle. A rejection vetoes the commit and the failure path below runs instead.
- * 2. Commits the change set.
- * 3. Notifies contributors of the outcome.
+ * 2. Rejects with `signal.reason` through the failure path if `signal` has aborted by now.
+ * 3. Commits the change set. An abort from here on has no effect.
+ * 4. Notifies contributors of the outcome.
  *
  * On failure:
  * 1. Drains contributors, logging failures instead of propagating them so the discard runs to completion and the
@@ -38,12 +39,13 @@ export interface OperationContributor {
  * 4. Rethrows.
  */
 export async function runOperation<T>(args: RunOperationArgs, fn: () => Promise<T>): Promise<T> {
-  const { stagedWriteCoordinator, contributors, changeSetId, log } = args;
+  const { stagedWriteCoordinator, contributors, changeSetId, signal, log } = args;
   try {
     const result = await fn();
 
     // Settling must stay outside the commit transaction: it can take arbitrarily long.
     await allToCompletion(contributors.map(contributor => contributor.settle?.(changeSetId)));
+    signal?.throwIfAborted();
     log.verbose(`Committing operation ${changeSetId}`, { changeSetId });
 
     await stagedWriteCoordinator.commit(changeSetId);
@@ -95,5 +97,7 @@ type RunOperationArgs = {
   contributors: OperationContributor[];
   /** The change set the operation's writes are staged under, from {@link StagedWriteCoordinator.begin}. */
   changeSetId: ChangeSetId;
+  /** Checked once more after contributors settle; the commit is not interrupted once it starts. */
+  signal?: AbortSignal;
   log: Logger;
 };

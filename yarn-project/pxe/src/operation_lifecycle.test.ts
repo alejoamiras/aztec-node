@@ -80,6 +80,34 @@ describe('runOperation', () => {
     expect(outcomes).toEqual(['discarded']);
   });
 
+  it('discards with the reason when the signal aborts after contributors settle', async () => {
+    const controller = new AbortController();
+    const reason = new Error('cancelled by the wallet');
+    const contributor: OperationContributor = {
+      settle: () => {
+        controller.abort(reason);
+        return Promise.resolve();
+      },
+      onOperationEnd: () => {},
+    };
+
+    const changeSetId = coordinator.begin();
+    const operation = runOperation(
+      {
+        stagedWriteCoordinator: coordinator,
+        contributors: [contributor],
+        changeSetId,
+        signal: controller.signal,
+        log: mockLog,
+      },
+      () => Promise.resolve('result'),
+    );
+
+    await expect(operation).rejects.toBe(reason);
+    expect(committed).toEqual([]);
+    expect(discarded).toEqual([changeSetId]);
+  });
+
   it('drains contributors before discarding on abort, even when settling fails', async () => {
     const { promise: settling, reject: failSettling } = promiseWithResolvers<void>();
 
