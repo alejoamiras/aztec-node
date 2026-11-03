@@ -2,6 +2,7 @@ import type { PrivateEventFilter } from '@aztec-labs/aztec.js/wallet';
 import { BlockNumber } from '@aztec-labs/foundation/branded-types';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
 import { Point } from '@aztec-labs/foundation/curves/grumpkin';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { inspect } from '@aztec-labs/foundation/inspect';
 import { type Logger, type LoggerBindings, createLogger } from '@aztec-labs/foundation/log';
 import { allToCompletion } from '@aztec-labs/foundation/promise';
@@ -109,6 +110,11 @@ export type ProveTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
+  /**
+   * Interrupts the call when it aborts: it rejects with `signal.reason` and its staged writes are discarded. Private
+   * execution and kernel proving stop at their next checkpoint; the Chonk proof itself may still run to completion.
+   */
+  signal?: AbortSignal;
 };
 
 /** Options for PXE.profileTx. */
@@ -121,6 +127,8 @@ export type ProfileTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
+  /** Interrupts the call when it aborts, as {@link ProveTxOpts.signal} does. */
+  signal?: AbortSignal;
 };
 
 /** Options for PXE.simulateTx. */
@@ -150,11 +158,16 @@ export type SimulateAndProveTxOpts = SimulateTxOpts & {
   /**
    * Returns the request to prove and its options, given the simulation's result. Runs inside the operation: other PXE
    * operations wait for it to return, and it must not call the PXE itself, since that call would wait for this
-   * operation to end.
+   * operation to end. A `signal` among the returned options is ignored: the operation's own `signal` governs it.
    */
   prepareProve: (
     simulationResult: TxSimulationResult,
-  ) => Promise<{ proveTxRequest: TxExecutionRequest; proveOpts: ProveTxOpts }>;
+  ) => Promise<{ proveTxRequest: TxExecutionRequest; proveOpts: Omit<ProveTxOpts, 'signal'> }>;
+  /**
+   * Interrupts the whole sequence when it aborts, as {@link ProveTxOpts.signal} does. No further tx data goes to the
+   * node once it has aborted, and no proof starts.
+   */
+  signal?: AbortSignal;
 };
 
 /** Options for PXE.executeUtility. */
@@ -513,6 +526,7 @@ export class PXE {
     scopes,
     changeSetId,
     senderForTags,
+    signal,
   }: {
     contractFunctionSimulator: ContractFunctionSimulator;
     txRequest: TxExecutionRequest;
@@ -520,6 +534,7 @@ export class PXE {
     scopes: AztecAddress[];
     changeSetId: ChangeSetId;
     senderForTags?: AztecAddress;
+    signal?: AbortSignal;
   }): Promise<PrivateExecutionResult> {
     const { origin: contractAddress, functionSelector } = txRequest;
 
@@ -547,6 +562,7 @@ export class PXE {
         scopes,
         changeSetId,
         senderForTags,
+        signal,
       });
       this.log.debug(`Private simulation completed for ${contractAddress.toString()}:${functionSelector}`);
       return result;
@@ -637,6 +653,7 @@ export class PXE {
    * @param proofCreator - The proof creator to use for proving the execution.
    * @param privateExecutionResult - The result of the private execution
    * @param config - The configuration for the kernel execution prover.
+   * @param signal - Interrupts the kernels and the proof; kept out of `config`, which is logged.
    * @returns An object that contains the output of the kernel execution, including the ChonkProof if proving is enabled.
    */
   async #prove(
@@ -645,6 +662,7 @@ export class PXE {
     privateExecutionResult: PrivateExecutionResult,
     anchorBlockHeader: BlockHeader,
     config: PrivateKernelExecutionProverConfig,
+    signal?: AbortSignal,
   ): Promise<PrivateKernelExecutionProofOutput<PrivateKernelTailCircuitPublicInputs>> {
     const kernelInputsProvider = new PrivateKernelInputsProvider(
       this.contractStore,
@@ -659,12 +677,17 @@ export class PXE {
       resolveExpirationAndPadding: this.hooks?.resolveExpirationAndPadding,
     });
     this.log.debug(`Executing kernel trace prover (${JSON.stringify(config)})...`);
-    return await kernelTraceProver.proveWithKernels(txExecutionRequest.toTxRequest(), privateExecutionResult, config);
+    return await kernelTraceProver.proveWithKernels(
+      txExecutionRequest.toTxRequest(),
+      privateExecutionResult,
+      config,
+      signal,
+    );
   }
 
   /** Simulates `txRequest` within an already-open operation, using its anchor block and change set. */
   async #simulateTx(
-    { changeSetId, syncTime, anchorBlockHeader, recording, totalMs }: SyncedOperationContext,
+    { changeSetId, syncTime, anchorBlockHeader, recording, totalMs, signal }: SyncedOperationContext,
     txRequest: TxExecutionRequest,
     {
       simulatePublic,
@@ -704,6 +727,7 @@ export class PXE {
       scopes,
       changeSetId,
       senderForTags,
+      signal,
     });
 
     let publicInputs: PrivateKernelTailCircuitPublicInputs | undefined;
@@ -729,6 +753,7 @@ export class PXE {
           skipFeeEnforcement,
           profileMode: 'none',
         },
+        signal,
       ));
     }
 
@@ -737,6 +762,7 @@ export class PXE {
     let publicSimulationTime: number | undefined;
     let publicOutput: PublicSimulationOutput | undefined;
     if (simulatePublic && publicInputs.forPublic) {
+      throwAbortErrorIfAborted(signal);
       const publicSimulationTimer = new Timer();
       publicOutput = await this.#simulatePublicCalls(simulatedTx, skipFeeEnforcement, overrides);
       publicSimulationTime = publicSimulationTimer.ms();
@@ -747,6 +773,7 @@ export class PXE {
 
     let validationTime: number | undefined;
     if (!skipTxValidation) {
+      throwAbortErrorIfAborted(signal);
       const validationTimer = new Timer();
       const validationResult = await this.node.isValidTx(simulatedTx, { isSimulation: true, skipFeeEnforcement });
       validationTime = validationTimer.ms();
@@ -813,7 +840,7 @@ export class PXE {
    * the sender tagging indices the tx uses.
    */
   async #proveTx(
-    { changeSetId, syncTime, anchorBlockHeader, recording, totalMs }: SyncedOperationContext,
+    { changeSetId, syncTime, anchorBlockHeader, recording, totalMs, signal }: SyncedOperationContext,
     txRequest: TxExecutionRequest,
     privateExecutionResult: PrivateExecutionResult,
   ): Promise<TxProvingResult> {
@@ -822,11 +849,14 @@ export class PXE {
       chonkProof,
       executionSteps,
       timings: { proving } = {},
-    } = await this.#prove(txRequest, this.proofCreator, privateExecutionResult, anchorBlockHeader, {
-      simulate: false,
-      skipFeeEnforcement: false,
-      profileMode: 'none',
-    });
+    } = await this.#prove(
+      txRequest,
+      this.proofCreator,
+      privateExecutionResult,
+      anchorBlockHeader,
+      { simulate: false, skipFeeEnforcement: false, profileMode: 'none' },
+      signal,
+    );
 
     const totalTime = totalMs();
 
@@ -1193,7 +1223,10 @@ export class PXE {
    * @throws If contract code not found, or public simulation reverts.
    * Also throws if simulatePublic is true and public simulation reverts.
    */
-  public proveTx(txRequest: TxExecutionRequest, { scopes, senderForTags }: ProveTxOpts): Promise<TxProvingResult> {
+  public proveTx(
+    txRequest: TxExecutionRequest,
+    { scopes, senderForTags, signal }: ProveTxOpts,
+  ): Promise<TxProvingResult> {
     let privateExecutionResult: PrivateExecutionResult;
     // We disable proving concurrently mostly out of caution, since it accesses some of our stores. Proving is so
     // computationally demanding that it'd be rare for someone to try to do it concurrently regardless.
@@ -1207,10 +1240,11 @@ export class PXE {
           scopes,
           changeSetId: ctx.changeSetId,
           senderForTags,
+          signal: ctx.signal,
         });
         return this.#proveTx(ctx, txRequest, privateExecutionResult);
       },
-      { errorContext: () => [inspect(txRequest), inspect(privateExecutionResult)] },
+      { errorContext: () => [inspect(txRequest), inspect(privateExecutionResult)], signal },
     );
   }
 
@@ -1222,7 +1256,7 @@ export class PXE {
    */
   public profileTx(
     txRequest: TxExecutionRequest,
-    { profileMode, skipProofGeneration = true, scopes, senderForTags }: ProfileTxOpts,
+    { profileMode, skipProofGeneration = true, scopes, senderForTags, signal }: ProfileTxOpts,
   ): Promise<TxProfileResult> {
     // We disable concurrent profiles for consistency with simulateTx.
     return this.operationQueue.runSynced(
@@ -1248,6 +1282,7 @@ export class PXE {
           scopes,
           changeSetId,
           senderForTags,
+          signal,
         });
 
         const { executionSteps, timings: { proving } = {} } = await this.#prove(
@@ -1260,6 +1295,7 @@ export class PXE {
             skipFeeEnforcement: false,
             profileMode,
           },
+          signal,
         );
 
         const totalTime = totalMs();
@@ -1289,7 +1325,7 @@ export class PXE {
 
         return new TxProfileResult(executionSteps, { timings, nodeRPCCalls: recording.stats() });
       },
-      { errorContext: () => [inspect(txRequest), `profileMode=${profileMode}`] },
+      { errorContext: () => [inspect(txRequest), `profileMode=${profileMode}`], signal },
     );
   }
 
@@ -1334,7 +1370,7 @@ export class PXE {
    */
   public simulateAndProveTx(
     simulationTxRequest: TxExecutionRequest,
-    { prepareProve, ...simulateOpts }: SimulateAndProveTxOpts,
+    { prepareProve, signal, ...simulateOpts }: SimulateAndProveTxOpts,
   ): Promise<TxProvingResult> {
     let proveTxRequest: TxExecutionRequest | undefined;
     let privateExecutionResult: PrivateExecutionResult | undefined;
@@ -1359,8 +1395,9 @@ export class PXE {
     return this.operationQueue.runSynced(
       async ctx => {
         const simulationResult = await this.#simulateTx(ctx, simulationTxRequest, simulateOpts);
-        let proveOpts: ProveTxOpts;
+        let proveOpts: Omit<ProveTxOpts, 'signal'>;
         ({ proveTxRequest, proveOpts } = await prepareProve(simulationResult));
+        throwAbortErrorIfAborted(ctx.signal);
 
         // The proving result's timings and node stats must cover proving alone, not the simulation before it.
         const provingTimer = new Timer();
@@ -1373,6 +1410,7 @@ export class PXE {
             scopes: proveOpts.scopes,
             changeSetId: ctx.changeSetId,
             senderForTags: proveOpts.senderForTags,
+            signal: ctx.signal,
           });
           return await this.#proveTx(
             { ...ctx, syncTime: 0, recording, totalMs: () => provingTimer.ms() },
@@ -1389,6 +1427,7 @@ export class PXE {
           inspect(proveTxRequest),
           inspect(privateExecutionResult),
         ],
+        signal,
       },
     );
   }

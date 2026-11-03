@@ -38,7 +38,7 @@ import {
   randomDeployedContract,
 } from '@aztec-labs/stdlib/testing';
 import { AppendOnlyTreeSnapshot } from '@aztec-labs/stdlib/trees';
-import { BlockHeader, GlobalVariables, TxHash } from '@aztec-labs/stdlib/tx';
+import { BlockHeader, GlobalVariables, TxExecutionRequest, TxHash } from '@aztec-labs/stdlib/tx';
 import { Buffer } from 'buffer';
 import { mock } from 'jest-mock-extended';
 import type { MockProxy } from 'jest-mock-extended/lib/Mock.js';
@@ -531,6 +531,29 @@ describe('PXE', () => {
       });
     });
   });
+  it('rejects each proving call with the reason of an aborted signal and keeps serving calls', async () => {
+    const txRequest = await TxExecutionRequest.random();
+    const reason = new Error('cancelled by the wallet');
+    const signal = AbortSignal.abort(reason);
+    const calls = [
+      () => pxe.proveTx(txRequest, { scopes: [], signal }),
+      () => pxe.profileTx(txRequest, { profileMode: 'full', skipProofGeneration: false, scopes: [], signal }),
+      () =>
+        pxe.simulateAndProveTx(txRequest, {
+          simulatePublic: false,
+          scopes: [],
+          signal,
+          prepareProve: () => Promise.reject(new Error('the simulation should not have run')),
+        }),
+    ];
+
+    for (const call of calls) {
+      await expect(call()).rejects.toBe(reason);
+      const instance = await randomContractInstanceWithAddress();
+      await expect(pxe.registerContract(instance)).resolves.toEqual(instance.address);
+    }
+  });
+
   // Note: Not testing a successful run of `proveTx`, `sendTx`, `getTxReceipt` and `executeUtility` here as it
   //       requires a larger setup and it's sufficiently tested in the e2e tests.
 });
