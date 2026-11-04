@@ -162,9 +162,9 @@ export class OperationQueue {
           try {
             return await fn(ctx);
           } catch (err) {
-            // The work stops with a cause-less `AbortError` rather than `signal.reason`: private execution assigns
-            // `message` on the errors that cross it, which a `DOMException` reason forbids, and the simulator walks
-            // `cause` chains without a cycle guard.
+            // Checkpoints stop the work with a cause-less `AbortError` rather than `signal.reason`: private execution
+            // assigns `message` on the errors that cross it, which a `DOMException` reason forbids, and the simulator
+            // walks `cause` chains without a cycle guard.
             throw signal && isInterruption(err, signal) ? signal.reason : err;
           }
         });
