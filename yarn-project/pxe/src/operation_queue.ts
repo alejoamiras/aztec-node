@@ -220,10 +220,11 @@ export class OperationQueue {
 
 /**
  * Whether `err` means the work stopped because `signal` aborted: the signal has aborted, and `err` or an error in its
- * `cause` chain is the signal's reason itself or an `AbortError`. Apart from its checkpoints, nothing on an operation's
- * path throws a foundation `AbortError`, so any one seen while the signal is aborted is this operation's. The walk
- * tolerates cycles, never inspects the reason, and treats an error it cannot inspect (a throwing `cause` getter or
- * proxy trap) as not an interruption, so the original failure is kept.
+ * `cause` chain is the signal's reason itself or an `AbortError`. Any `AbortError` seen while the signal is aborted is
+ * taken as this operation's interruption: relabelling an unrelated one as the reason costs nothing, since the caller
+ * aborted and the operation's writes are discarded either way. The walk tolerates cycles, never inspects the reason,
+ * and treats an error it cannot inspect (a throwing `cause` getter or proxy trap) as not an interruption, so the
+ * original failure is kept.
  */
 function isInterruption(err: unknown, signal: AbortSignal): boolean {
   if (!signal.aborted) {
