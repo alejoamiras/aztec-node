@@ -113,8 +113,8 @@ export type ProveTxOpts = {
   /**
    * Interrupts the call when it aborts before the operation commits: the call rejects with `signal.reason`, unless the
    * work already failed with another error, and its staged writes are discarded. Private execution and kernel proving
-   * stop at their next checkpoint; the Chonk proof itself may still run to completion. An abort once the commit has
-   * started has no effect.
+   * stop at their next checkpoint. The Chonk proof stops mid-way on a backend that can interrupt it, and otherwise after
+   * the command in progress. An abort once the commit has started has no effect.
    */
   signal?: AbortSignal;
 };
