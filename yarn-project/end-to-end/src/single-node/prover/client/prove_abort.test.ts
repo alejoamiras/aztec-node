@@ -12,6 +12,8 @@ import { AutomineTestContext } from '../../../automine/automine_test_context.js'
 import type { TestWallet } from '../../../test-wallet/test_wallet.js';
 import type { ProvenTx } from '../../../test-wallet/utils.js';
 
+// A hang guard, not a budget: the suite makes three real Chonk proofs (one stopped a quarter of the way in) and took
+// 22 s on a 188-CPU machine; twenty minutes allows for CI's far slower CPUS=2:MEM=4g host and still ends a stuck run.
 jest.setTimeout(20 * 60 * 1000);
 
 /** One call to the real `AztecClientBackend.prove`, as the pass-through spy saw it. */
