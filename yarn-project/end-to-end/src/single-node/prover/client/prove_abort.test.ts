@@ -125,11 +125,12 @@ const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
     });
 
     expect(abortedWhileProving).toBe(true);
+    await expect(tx2Prove.promise).rejects.toBe(reason);
     expect(tx2Error).toBe(reason);
     expect(tx3Result).toEqual({ tx: expect.anything() });
     expect(Barretenberg.getSingleton()).toBe(barretenberg);
-    // Last, so that against a bb.js that ignores the signal every other expectation has already been checked.
-    await expect(tx2Prove.promise).rejects.toBe(reason);
+    // Checked after the abort: bb.js turns it false when bb does not acknowledge an interrupt it was sent.
+    expect(barretenberg.interruptible).toBe(true);
   });
 
   it('starts no proof when the signal aborts while prepareProve runs', async () => {
