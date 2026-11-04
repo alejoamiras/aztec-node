@@ -389,8 +389,16 @@ export class TestWallet extends BaseWallet {
 
   /** Proves `exec` without sending it. `signal` aborts the proof as `PXE.proveTx` documents. */
   async proveTx(exec: ExecutionPayload, opts: ProveTxOptions): Promise<ProvenTx> {
+    return (await this.prepareProveTx(exec, opts))();
+  }
+
+  /**
+   * Builds the request that {@link proveTx} proves and returns a function that proves it. Building it runs PXE
+   * operations of its own; calling the function enqueues only the proving operation, synchronously.
+   */
+  async prepareProveTx(exec: ExecutionPayload, opts: ProveTxOptions): Promise<() => Promise<ProvenTx>> {
     const { txRequest, proveOpts } = await this.provableRequest(exec, opts);
-    return this.toProvenTx(await this.pxe.proveTx(txRequest, { ...proveOpts, signal: opts.signal }));
+    return async () => this.toProvenTx(await this.pxe.proveTx(txRequest, { ...proveOpts, signal: opts.signal }));
   }
 
   /**

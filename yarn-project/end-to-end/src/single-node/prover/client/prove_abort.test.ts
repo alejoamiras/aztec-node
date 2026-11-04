@@ -24,15 +24,14 @@ type ProveCall = {
 
 const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
 
-// Aborts a real Chonk proof mid-way through PXE.proveTx and checks that the abort reaches bb.js, the call rejects with
-// the caller's reason, and the next proof runs on the same Barretenberg instance. Real proofs only: with fake proofs
-// there is no bb.js proof to interrupt.
+// Real proofs only: with fake proofs bb.js never proves, so there is nothing to interrupt.
 (REAL_PROOFS ? describe : describe.skip)('single-node/prover/client/prove_abort', () => {
   const reason = new Error('cancelled by the wallet');
   const proveCalls: ProveCall[] = [];
   let suiteStartedAt: number;
   let logger: Logger;
   let proveSpy: jest.SpiedFunction<AztecClientBackend['prove']>;
+  let chonkProveSpy: jest.SpiedFunction<Barretenberg['chonkProve']>;
   let teardown: () => Promise<void>;
   let wallet: TestWallet;
   let owner: AztecAddress;
@@ -66,11 +65,13 @@ const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
       proveCalls.push(call);
       return promise;
     });
+    chonkProveSpy = jest.spyOn(Barretenberg.prototype, 'chonkProve');
   });
 
   afterAll(async () => {
     clearTimeout(abortTimer);
     proveSpy?.mockRestore();
+    chonkProveSpy?.mockRestore();
     await teardown?.();
     logger?.info('prove_abort suite finished', { suiteMs: performance.now() - suiteStartedAt });
   });
@@ -86,7 +87,13 @@ const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
     const baselineMs = warmUp.settledAt! - warmUp.startedAt;
     const barretenberg = Barretenberg.getSingleton();
 
+    // Built before tx 2 starts: building it runs PXE operations that would otherwise wait for tx 2 to finish.
+    const proveTx3 = await wallet.prepareProveTx(await contract.methods.emit_nullifier(Fr.random()).request(), {
+      from: owner,
+    });
+
     const controller = new AbortController();
+    const chonkProvesBefore = chonkProveSpy.mock.calls.length;
     let tx2RejectedAt: number | undefined;
     const tx2Outcome = proveNullifier(controller.signal).then(
       () => undefined,
@@ -96,7 +103,8 @@ const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
       },
     );
     const tx2Prove = await retryUntil(() => proveCalls[1], 'tx 2 prove() start', 600, 0.05);
-    const tx3Outcome = proveNullifier().then(
+    const tx3QueuedWhileProving = tx2Prove.settledAt === undefined;
+    const tx3Outcome = proveTx3().then(
       tx => ({ tx }),
       (err: unknown) => ({ err }),
     );
@@ -124,7 +132,10 @@ const REAL_PROOFS = !parseBooleanEnv(process.env.FAKE_PROOFS);
       tx3ProveMs: tx3Prove?.settledAt === undefined ? undefined : tx3Prove.settledAt - tx3Prove.startedAt,
     });
 
+    expect(tx3QueuedWhileProving).toBe(true);
     expect(abortedWhileProving).toBe(true);
+    // bb's own answer to a Chonk command stopped by an interrupt; later Chonk commands get it too until it is cleared.
+    await expect(chonkProveSpy.mock.results[chonkProvesBefore]?.value).rejects.toThrow('bb: interrupted');
     await expect(tx2Prove.promise).rejects.toBe(reason);
     expect(tx2Error).toBe(reason);
     expect(tx3Result).toEqual({ tx: expect.anything() });
