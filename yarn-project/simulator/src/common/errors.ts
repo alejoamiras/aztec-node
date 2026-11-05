@@ -2,6 +2,7 @@ import type { RawAssertionPayload } from '@aztec-foundation/noir-acvm_js';
 import { abiDecodeError } from '@aztec-foundation/noir-noirc_abi';
 
 import type { Fr } from '@aztec-labs/foundation/curves/bn254';
+import { causeChain } from '@aztec-labs/foundation/error';
 import { jsonStringify } from '@aztec-labs/foundation/json-rpc';
 import type {
   BrilligFunctionId,
@@ -44,19 +45,16 @@ export class ExecutionError extends Error {
 }
 
 /**
- * Traverses the cause chain of an error.
+ * Traverses the cause chain of an error, stopping at the first cause that is not an `Error` or at a cycle.
  * @param error - The error to start from.
  * @param callback - A callback on every error, including the first one.
  */
 export function traverseCauseChain(error: Error, callback: (error: Error) => void) {
-  let currentError: Error | undefined = error;
-  while (currentError) {
-    callback(currentError);
-    if (currentError.cause && currentError.cause instanceof Error) {
-      currentError = currentError.cause;
-    } else {
-      currentError = undefined;
+  for (const cause of causeChain(error)) {
+    if (!(cause instanceof Error)) {
+      break;
     }
+    callback(cause);
   }
 }
 

@@ -111,10 +111,9 @@ export type ProveTxOpts = {
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
   /**
-   * Interrupts the call when it aborts before the operation commits: the call rejects with `signal.reason`, unless the
-   * work already failed with another error, and its staged writes are discarded. Private execution and kernel proving
-   * stop at their next checkpoint. The Chonk proof stops mid-way on a backend that can interrupt it, and otherwise after
-   * the command in progress. An abort once the commit has started has no effect.
+   * Aborts the call, which rejects with `signal.reason` and keeps nothing it would have stored. Proving stops mid-way
+   * where the backend supports it, otherwise after the step in progress. A call that already failed keeps its own
+   * error, and an abort once the result is being committed has no effect.
    */
   signal?: AbortSignal;
 };
@@ -129,7 +128,7 @@ export type ProfileTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
-  /** Interrupts the call when it aborts, as {@link ProveTxOpts.signal} does. */
+  /** Aborts the call, as {@link ProveTxOpts.signal} does. */
   signal?: AbortSignal;
 };
 
@@ -153,6 +152,8 @@ export type SimulateTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
+  /** Aborts the call, as {@link ProveTxOpts.signal} does. */
+  signal?: AbortSignal;
 };
 
 /** Options for PXE.simulateAndProveTx. */
@@ -160,16 +161,11 @@ export type SimulateAndProveTxOpts = SimulateTxOpts & {
   /**
    * Returns the request to prove and its options, given the simulation's result. Runs inside the operation: other PXE
    * operations wait for it to return, and it must not call the PXE itself, since that call would wait for this
-   * operation to end. A `signal` among the returned options is ignored: the operation's own `signal` governs it.
+   * operation to end.
    */
   prepareProve: (
     simulationResult: TxSimulationResult,
   ) => Promise<{ proveTxRequest: TxExecutionRequest; proveOpts: Omit<ProveTxOpts, 'signal'> }>;
-  /**
-   * Interrupts the whole sequence when it aborts, as {@link ProveTxOpts.signal} does. Once it has aborted, the public
-   * simulation and the validity check are not sent to the node, and no proof starts.
-   */
-  signal?: AbortSignal;
 };
 
 /** Options for PXE.executeUtility. */
@@ -655,7 +651,6 @@ export class PXE {
    * @param proofCreator - The proof creator to use for proving the execution.
    * @param privateExecutionResult - The result of the private execution
    * @param config - The configuration for the kernel execution prover.
-   * @param signal - Interrupts the kernels and the proof; kept out of `config`, which is logged.
    * @returns An object that contains the output of the kernel execution, including the ChonkProof if proving is enabled.
    */
   async #prove(
@@ -664,7 +659,6 @@ export class PXE {
     privateExecutionResult: PrivateExecutionResult,
     anchorBlockHeader: BlockHeader,
     config: PrivateKernelExecutionProverConfig,
-    signal?: AbortSignal,
   ): Promise<PrivateKernelExecutionProofOutput<PrivateKernelTailCircuitPublicInputs>> {
     const kernelInputsProvider = new PrivateKernelInputsProvider(
       this.contractStore,
@@ -679,12 +673,7 @@ export class PXE {
       resolveExpirationAndPadding: this.hooks?.resolveExpirationAndPadding,
     });
     this.log.debug(`Executing kernel trace prover (${JSON.stringify(config)})...`);
-    return await kernelTraceProver.proveWithKernels(
-      txExecutionRequest.toTxRequest(),
-      privateExecutionResult,
-      config,
-      signal,
-    );
+    return await kernelTraceProver.proveWithKernels(txExecutionRequest.toTxRequest(), privateExecutionResult, config);
   }
 
   /** Simulates `txRequest` within an already-open operation, using its anchor block and change set. */
@@ -754,8 +743,8 @@ export class PXE {
           simulate: true,
           skipFeeEnforcement,
           profileMode: 'none',
+          signal,
         },
-        signal,
       ));
     }
 
@@ -851,14 +840,12 @@ export class PXE {
       chonkProof,
       executionSteps,
       timings: { proving } = {},
-    } = await this.#prove(
-      txRequest,
-      this.proofCreator,
-      privateExecutionResult,
-      anchorBlockHeader,
-      { simulate: false, skipFeeEnforcement: false, profileMode: 'none' },
+    } = await this.#prove(txRequest, this.proofCreator, privateExecutionResult, anchorBlockHeader, {
+      simulate: false,
+      skipFeeEnforcement: false,
+      profileMode: 'none',
       signal,
-    );
+    });
 
     const totalTime = totalMs();
 
@@ -1262,7 +1249,8 @@ export class PXE {
   ): Promise<TxProfileResult> {
     // We disable concurrent profiles for consistency with simulateTx.
     return this.operationQueue.runSynced(
-      async ({ changeSetId, syncTime, anchorBlockHeader, recording, totalMs }) => {
+      async ctx => {
+        const { changeSetId, syncTime, anchorBlockHeader, recording, totalMs } = ctx;
         const txInfo = {
           origin: txRequest.origin,
           functionSelector: txRequest.functionSelector,
@@ -1284,7 +1272,7 @@ export class PXE {
           scopes,
           changeSetId,
           senderForTags,
-          signal,
+          signal: ctx.signal,
         });
 
         const { executionSteps, timings: { proving } = {} } = await this.#prove(
@@ -1296,8 +1284,8 @@ export class PXE {
             simulate: skipProofGeneration,
             skipFeeEnforcement: false,
             profileMode,
+            signal: ctx.signal,
           },
-          signal,
         );
 
         const totalTime = totalMs();
@@ -1355,6 +1343,7 @@ export class PXE {
     // delete the same read value, or reading values that another simulation is currently modifying).
     return this.operationQueue.runSynced(ctx => this.#simulateTx(ctx, txRequest, opts), {
       errorContext: () => this.#simulateTxErrorContext(txRequest, opts),
+      signal: opts.signal,
     });
   }
 

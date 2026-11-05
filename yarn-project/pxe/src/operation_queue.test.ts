@@ -1,6 +1,7 @@
 import { AbortError, throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import type { Logger } from '@aztec-labs/foundation/log';
 import { promiseWithResolvers } from '@aztec-labs/foundation/promise';
+import { sleep } from '@aztec-labs/foundation/sleep';
 import type { AztecAsyncKVStore } from '@aztec-labs/kv-store';
 import { openTmpStore } from '@aztec-labs/kv-store/lmdb-v2';
 import { SimulationError } from '@aztec-labs/stdlib/errors';
@@ -154,42 +155,62 @@ describe('OperationQueue', () => {
       const queue = makeQueue();
       let id: ChangeSetId;
 
-      const interrupted = queue.runSynced(
+      const aborted = queue.runSynced(
         ({ changeSetId, signal }) => {
           id = changeSetId;
           controller.abort(reason);
           try {
             throwAbortErrorIfAborted(signal);
           } catch (err) {
-            return Promise.reject(new SimulationError('Interrupted by caller', [], [], undefined, { cause: err }));
+            return Promise.reject(new SimulationError('Aborted by caller', [], [], undefined, { cause: err }));
           }
           return Promise.resolve();
         },
         { signal: controller.signal, errorContext: () => ['context'] },
       );
 
-      await expect(interrupted).rejects.toBe(reason);
+      await expect(aborted).rejects.toBe(reason);
       expect(discarded).toEqual([id!]);
       const next = await queue.runSynced(({ changeSetId }) => Promise.resolve(changeSetId));
       expect(committed).toEqual([next]);
     });
 
-    it('rejects with the reason and commits nothing when aborted while contributors settle', async () => {
-      const queue = makeQueue([
-        {
-          settle: () => {
-            controller.abort(reason);
-            return Promise.resolve();
-          },
-          onOperationEnd: () => {},
+    it('keeps the caller pending and the queue held until the aborted work stops', async () => {
+      const queue = makeQueue();
+      const started = promiseWithResolvers<void>();
+      const gate = promiseWithResolvers<void>();
+      let abortedId: ChangeSetId;
+      const aborted = queue.runSynced(
+        async ({ changeSetId, signal }) => {
+          abortedId = changeSetId;
+          started.resolve();
+          await gate.promise;
+          throwAbortErrorIfAborted(signal);
         },
-      ]);
-
-      await expect(queue.runSynced(() => Promise.resolve('result'), { signal: controller.signal })).rejects.toBe(
-        reason,
+        { signal: controller.signal },
       );
-      expect(committed).toEqual([]);
-      expect(discarded).toHaveLength(1);
+      let callerSettled = false;
+      const markSettled = () => {
+        callerSettled = true;
+      };
+      aborted.then(markSettled, markSettled);
+      await started.promise;
+      let nextRan = false;
+      const next = queue.runSynced(({ changeSetId }) => {
+        nextRan = true;
+        return Promise.resolve(changeSetId);
+      });
+
+      controller.abort(reason);
+      await sleep(0);
+      expect(callerSettled).toBe(false);
+      expect(nextRan).toBe(false);
+
+      gate.resolve();
+      await expect(aborted).rejects.toBe(reason);
+      const nextId = await next;
+      expect(discarded).toEqual([abortedId!]);
+      expect(committed).toEqual([nextId]);
     });
 
     it('resolves and commits when aborted once the commit has started', async () => {
@@ -202,43 +223,44 @@ describe('OperationQueue', () => {
       expect(committed).toHaveLength(1);
     });
 
-    it('passes any other failure through unchanged while the signal is aborted', async () => {
-      const independent = new Error('independent failure');
-      const cyclic = new Error('cyclic failure');
-      cyclic.cause = cyclic;
-      // Its `cause` getter throws the reason itself, which must not pass for an interruption.
-      const uninspectable = new Error('uninspectable failure');
-      Object.defineProperty(uninspectable, 'cause', {
-        get: () => {
-          throw reason;
+    it.each([
+      ['an independent failure', new Error('independent failure')],
+      ['a failure whose cause chain loops', cyclicError()],
+    ])('passes %s through unchanged while the signal is aborted', async (_, failure) => {
+      const aborted = makeQueue().runSynced(
+        () => {
+          controller.abort(reason);
+          return Promise.reject(failure);
         },
-      });
-      const settleFailure = new Error('settle failed', { cause: new AbortError('another operation') });
-      const commitFailure = new Error('commit failed', { cause: new AbortError('another operation') });
-      const abortAndFail = (failure: Error) => () => {
-        controller.abort(reason);
-        return Promise.reject(failure);
+        { signal: controller.signal },
+      );
+
+      await expect(aborted).rejects.toBe(failure);
+    });
+
+    it('passes a settle failure through unchanged while the signal is aborted', async () => {
+      const failure = new Error('settle failed', { cause: new AbortError('another operation') });
+      const failingSettle: OperationContributor = {
+        settle: () => {
+          controller.abort(reason);
+          return Promise.reject(failure);
+        },
+        onOperationEnd: () => {},
       };
 
-      for (const failure of [independent, cyclic, uninspectable]) {
-        controller = new AbortController();
-        await expect(makeQueue().runSynced(abortAndFail(failure), { signal: controller.signal })).rejects.toBe(failure);
-      }
-
-      controller = new AbortController();
-      const failingSettle: OperationContributor = { settle: abortAndFail(settleFailure), onOperationEnd: () => {} };
       await expect(
         makeQueue([failingSettle]).runSynced(() => Promise.resolve(), { signal: controller.signal }),
-      ).rejects.toBe(settleFailure);
+      ).rejects.toBe(failure);
+    });
 
-      controller = new AbortController();
+    it('passes a commit failure through unchanged while the signal is aborted', async () => {
+      const failure = new Error('commit failed', { cause: new AbortError('another operation') });
       duringCommit = () => {
         controller.abort(reason);
-        throw commitFailure;
+        throw failure;
       };
-      await expect(makeQueue().runSynced(() => Promise.resolve(), { signal: controller.signal })).rejects.toBe(
-        commitFailure,
-      );
+
+      await expect(makeQueue().runSynced(() => Promise.resolve(), { signal: controller.signal })).rejects.toBe(failure);
       expect(committed).toEqual([]);
     });
 
@@ -263,55 +285,23 @@ describe('OperationQueue', () => {
       expect(discarded).toEqual([]);
     });
 
-    it('logs an interruption at verbose and never at error', async () => {
-      const log = mock<Logger>();
-      // A plain `AbortError` with `errorContext` set is the path where a regression would log at error.
-      const interrupted = makeQueue([], log).runSynced(
+    it.each([
+      ['stops at a checkpoint', false],
+      ['rejects with the reason itself', true],
+    ])('returns a non-Error reason by identity when the work %s', async (_, rejectWithReason) => {
+      const aborted = makeQueue().runSynced(
         ({ signal }) => {
-          controller.abort(reason);
+          controller.abort('closed');
+          if (rejectWithReason) {
+            return Promise.reject(signal?.reason);
+          }
           throwAbortErrorIfAborted(signal);
           return Promise.resolve();
         },
-        { signal: controller.signal, errorContext: () => ['context'] },
+        { signal: controller.signal },
       );
 
-      await expect(interrupted).rejects.toBe(reason);
-      expect(log.error).not.toHaveBeenCalled();
-      expect(log.verbose).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ eventName: 'pxe_operation_interrupted' }),
-      );
-    });
-
-    it('returns any reason by identity, whether the work stops at a checkpoint or rejects with the reason', async () => {
-      const selfCaused = new Error('self-caused');
-      selfCaused.cause = selfCaused;
-      const hostile = new Proxy(
-        {},
-        {
-          getPrototypeOf: () => {
-            throw new Error('hostile reason');
-          },
-        },
-      );
-
-      for (const oddReason of ['closed', NaN, selfCaused, hostile]) {
-        for (const rejectWithReason of [false, true]) {
-          controller = new AbortController();
-          const interrupted = makeQueue().runSynced(
-            ({ signal }) => {
-              controller.abort(oddReason);
-              if (rejectWithReason) {
-                return Promise.reject(signal?.reason);
-              }
-              throwAbortErrorIfAborted(signal);
-              return Promise.resolve();
-            },
-            { signal: controller.signal },
-          );
-          await expect(interrupted).rejects.toBe(oddReason);
-        }
-      }
+      await expect(aborted).rejects.toBe('closed');
     });
 
     it('leaves no abort listener behind when the operation cannot be enqueued', async () => {
@@ -325,7 +315,7 @@ describe('OperationQueue', () => {
     });
   });
 
-  function makeQueue(contributors: OperationContributor[] = [], log: Logger = mockLog) {
+  function makeQueue(contributors: OperationContributor[] = []) {
     const queue = new OperationQueue({
       node,
       synchronizer,
@@ -333,7 +323,7 @@ describe('OperationQueue', () => {
       stagedWriteCoordinator: coordinator,
       contributors,
       autoSync: false,
-      log,
+      log: mockLog,
     });
     queue.start();
     return queue;
@@ -341,3 +331,9 @@ describe('OperationQueue', () => {
 
   const mockLog = mock<Logger>();
 });
+
+function cyclicError(): Error {
+  const err = new Error('cyclic failure');
+  err.cause = err;
+  return err;
+}

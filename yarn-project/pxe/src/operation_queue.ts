@@ -1,4 +1,4 @@
-import { AbortError } from '@aztec-labs/foundation/error';
+import { AbortError, causeChain } from '@aztec-labs/foundation/error';
 import type { Logger } from '@aztec-labs/foundation/log';
 import { promiseWithResolvers } from '@aztec-labs/foundation/promise';
 import { SerialQueue } from '@aztec-labs/foundation/queue';
@@ -123,8 +123,8 @@ export class OperationQueue {
    *
    * When `signal` aborts, the call rejects with `signal.reason`. A queued operation is rejected at once and never runs.
    * A running one stops at its next checkpoint and discards its staged writes; the queue moves on only once its work
-   * has stopped, which includes node requests and contributor work already in flight. A failure other than the
-   * interruption keeps its own error, and an abort after the commit has started has no effect.
+   * has stopped, which includes node requests and contributor work already in flight. A failure other than the abort
+   * keeps its own error, and an abort after the commit has started has no effect.
    */
   public runSynced<T>(
     fn: (ctx: SyncedOperationContext) => Promise<T>,
@@ -145,6 +145,7 @@ export class OperationQueue {
         }
         const syncTime = syncTimer.ms();
         const anchorBlockHeader = await this.anchorBlockStore.getBlockHeader();
+        // The reason itself rather than an `AbortError`: nothing between here and the caller rewraps it.
         signal?.throwIfAborted();
 
         changeSetId = this.stagedWriteCoordinator.begin();
@@ -162,16 +163,15 @@ export class OperationQueue {
           try {
             return await fn(ctx);
           } catch (err) {
-            // Checkpoints stop the work with a cause-less `AbortError` rather than `signal.reason`: private execution
-            // assigns `message` on the errors that cross it, which a `DOMException` reason forbids, and the simulator
-            // walks `cause` chains without a cycle guard.
-            throw signal && isInterruption(err, signal) ? signal.reason : err;
+            // Checkpoints throw a cause-less `AbortError` (see `throwAbortErrorIfAborted`); this is where it becomes
+            // the caller's reason again.
+            throw signal && isAbortOf(err, signal) ? signal.reason : err;
           }
         });
       } catch (err: any) {
         if (signal?.aborted && Object.is(err, signal.reason)) {
-          this.log.verbose('PXE operation interrupted by caller', {
-            eventName: 'pxe_operation_interrupted',
+          this.log.verbose('PXE operation aborted by caller', {
+            eventName: 'pxe_operation_aborted',
             changeSetId,
           });
           throw err;
@@ -219,34 +219,12 @@ export class OperationQueue {
 }
 
 /**
- * Whether `err` means the work stopped because `signal` aborted: the signal has aborted, and `err` or an error in its
- * `cause` chain is the signal's reason itself or an `AbortError`. Any `AbortError` seen while the signal is aborted is
- * taken as this operation's interruption: relabelling an unrelated one as the reason costs nothing, since the caller
- * aborted and the operation's writes are discarded either way. The walk tolerates cycles, never inspects the reason,
- * and treats an error it cannot inspect (a throwing `cause` getter or proxy trap) as not an interruption, so the
- * original failure is kept.
+ * Whether `err` means the work stopped because `signal` aborted: its cause chain holds the signal's reason or an
+ * `AbortError`. An unrelated `AbortError` seen while aborted counts too; relabelling it costs nothing, since the
+ * operation's writes are discarded either way.
  */
-function isInterruption(err: unknown, signal: AbortSignal): boolean {
-  if (!signal.aborted) {
-    return false;
-  }
-  const seen = new Set<unknown>();
-  let current = err;
-  try {
-    while (!seen.has(current)) {
-      if (Object.is(current, signal.reason) || current instanceof AbortError) {
-        return true;
-      }
-      if (typeof current !== 'object' || current === null || !('cause' in current)) {
-        return false;
-      }
-      seen.add(current);
-      current = current.cause;
-    }
-  } catch {
-    return false;
-  }
-  return false;
+function isAbortOf(err: unknown, signal: AbortSignal): boolean {
+  return signal.aborted && causeChain(err).some(c => Object.is(c, signal.reason) || c instanceof AbortError);
 }
 
 /** Dependencies of the {@link OperationQueue}. */

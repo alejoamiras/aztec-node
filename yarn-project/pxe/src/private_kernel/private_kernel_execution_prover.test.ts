@@ -127,7 +127,12 @@ describe('Private Kernel Sequencer', () => {
   });
 
   const prove = (executionResult: PrivateExecutionResult, signal?: AbortSignal) =>
-    prover.proveWithKernels(txRequest, executionResult, undefined, signal);
+    prover.proveWithKernels(txRequest, executionResult, {
+      simulate: false,
+      skipFeeEnforcement: false,
+      profileMode: 'none',
+      signal,
+    });
 
   beforeEach(async () => {
     txRequest = makeTxRequest();

@@ -488,7 +488,6 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
     executionSteps: PrivateExecutionStep[],
     signal?: AbortSignal,
   ): Promise<ChonkProofWithPublicInputs> {
-    throwAbortErrorIfAborted(signal);
     const timer = new Timer();
     this.log.info(`Generating ClientIVC proof...`);
     const barretenberg = await Barretenberg.initSingleton({
