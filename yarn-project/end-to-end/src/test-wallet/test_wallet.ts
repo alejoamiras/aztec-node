@@ -397,7 +397,7 @@ export class TestWallet extends BaseWallet {
    * operations of its own; calling the function enqueues only the proving operation, synchronously.
    */
   async prepareProveTx(exec: ExecutionPayload, opts: ProveTxOptions): Promise<() => Promise<ProvenTx>> {
-    const { txRequest, proveOpts } = await this.provableRequest(exec, opts);
+    const { txRequest, proveOpts } = await this.createProvableRequest(exec, opts);
     return async () => this.toProvenTx(await this.pxe.proveTx(txRequest, { ...proveOpts, signal: opts.signal }));
   }
 
@@ -409,7 +409,7 @@ export class TestWallet extends BaseWallet {
     exec: ExecutionPayload,
     opts: ProveTxOptions & { onSimulated?: () => void },
   ): Promise<ProvenTx> {
-    const { txRequest, proveOpts } = await this.provableRequest(exec, opts);
+    const { txRequest, proveOpts } = await this.createProvableRequest(exec, opts);
     const txProvingResult = await this.pxe.simulateAndProveTx(txRequest, {
       simulatePublic: true,
       ...proveOpts,
@@ -422,7 +422,7 @@ export class TestWallet extends BaseWallet {
     return this.toProvenTx(txProvingResult);
   }
 
-  private async provableRequest(exec: ExecutionPayload, opts: ProveTxOptions) {
+  private async createProvableRequest(exec: ExecutionPayload, opts: ProveTxOptions) {
     const fee = await this.completeFeeOptions({
       from: opts.from,
       feePayer: exec.feePayer,
