@@ -282,9 +282,9 @@ export interface PrivateKernelProver {
   /**
    * Creates the Chonk proof of a transaction's private execution.
    * @param executionSteps - The circuits of the transaction, in execution order, with their witnesses and keys.
-   * @param signal - When it aborts, the call rejects once the work has stopped: with an `AbortError` from a check
-   * before proving, or with `signal.reason` when the proving backend noticed it. An implementation that cannot
-   * interrupt proving may finish and resolve.
+   * @param signal - Stops the proof when it aborts. The call rejects once the work has stopped, with `signal.reason` or
+   * an `AbortError` (the PXE maps either back to the caller's reason); an implementation that ignores it runs the proof
+   * to completion.
    */
   createChonkProof(executionSteps: PrivateExecutionStep[], signal?: AbortSignal): Promise<ChonkProofWithPublicInputs>;
 

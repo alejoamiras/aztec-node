@@ -111,10 +111,9 @@ export type ProveTxOpts = {
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
   /**
-   * Interrupts the call when it aborts before the operation commits: the call rejects with `signal.reason`, unless the
-   * work already failed with another error, and its staged writes are discarded. Private execution and kernel proving
-   * stop at their next checkpoint; the Chonk proof itself may still run to completion. An abort once the commit has
-   * started has no effect.
+   * Aborts the call, which rejects with `signal.reason` and keeps nothing it would have stored. Proving stops mid-way
+   * where the backend supports it, otherwise after the step in progress. A call that already failed keeps its own
+   * error, and an abort once the result is being committed has no effect.
    */
   signal?: AbortSignal;
 };
@@ -129,7 +128,7 @@ export type ProfileTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
-  /** Interrupts the call when it aborts, as {@link ProveTxOpts.signal} does. */
+  /** Aborts the call, as {@link ProveTxOpts.signal} does. */
   signal?: AbortSignal;
 };
 

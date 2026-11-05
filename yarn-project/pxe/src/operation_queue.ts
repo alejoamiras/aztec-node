@@ -163,8 +163,8 @@ export class OperationQueue {
           try {
             return await fn(ctx);
           } catch (err) {
-            // Checkpoints throw a cause-less `AbortError` (see `throwAbortErrorIfAborted`); this is where it becomes the
-            // caller's reason again.
+            // Checkpoints throw a cause-less `AbortError` (see `throwAbortErrorIfAborted`); this is where it becomes
+            // the caller's reason again.
             throw signal && isAbortOf(err, signal) ? signal.reason : err;
           }
         });
