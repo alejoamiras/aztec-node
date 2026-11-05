@@ -1,6 +1,7 @@
 import { AbortError, throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import type { Logger } from '@aztec-labs/foundation/log';
 import { promiseWithResolvers } from '@aztec-labs/foundation/promise';
+import { sleep } from '@aztec-labs/foundation/sleep';
 import type { AztecAsyncKVStore } from '@aztec-labs/kv-store';
 import { openTmpStore } from '@aztec-labs/kv-store/lmdb-v2';
 import { SimulationError } from '@aztec-labs/stdlib/errors';
@@ -172,6 +173,44 @@ describe('OperationQueue', () => {
       expect(discarded).toEqual([id!]);
       const next = await queue.runSynced(({ changeSetId }) => Promise.resolve(changeSetId));
       expect(committed).toEqual([next]);
+    });
+
+    it('keeps the caller pending and the queue held until the aborted work stops', async () => {
+      const queue = makeQueue();
+      const started = promiseWithResolvers<void>();
+      const gate = promiseWithResolvers<void>();
+      let abortedId: ChangeSetId;
+      const aborted = queue.runSynced(
+        async ({ changeSetId, signal }) => {
+          abortedId = changeSetId;
+          started.resolve();
+          await gate.promise;
+          throwAbortErrorIfAborted(signal);
+        },
+        { signal: controller.signal },
+      );
+      let callerSettled = false;
+      const markSettled = () => {
+        callerSettled = true;
+      };
+      aborted.then(markSettled, markSettled);
+      await started.promise;
+      let nextRan = false;
+      const next = queue.runSynced(({ changeSetId }) => {
+        nextRan = true;
+        return Promise.resolve(changeSetId);
+      });
+
+      controller.abort(reason);
+      await sleep(0);
+      expect(callerSettled).toBe(false);
+      expect(nextRan).toBe(false);
+
+      gate.resolve();
+      await expect(aborted).rejects.toBe(reason);
+      const nextId = await next;
+      expect(discarded).toEqual([abortedId!]);
+      expect(committed).toEqual([nextId]);
     });
 
     it('resolves and commits when aborted once the commit has started', async () => {
