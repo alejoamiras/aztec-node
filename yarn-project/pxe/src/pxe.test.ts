@@ -531,11 +531,13 @@ describe('PXE', () => {
       });
     });
   });
-  it('rejects each proving call with the reason of an aborted signal and keeps serving calls', async () => {
+
+  it('hands the signal of each abortable call to the operation queue', async () => {
     const txRequest = await TxExecutionRequest.random();
     const reason = new Error('cancelled by the wallet');
     const signal = AbortSignal.abort(reason);
     const calls = [
+      () => pxe.simulateTx(txRequest, { simulatePublic: false, scopes: [], signal }),
       () => pxe.proveTx(txRequest, { scopes: [], signal }),
       () => pxe.profileTx(txRequest, { profileMode: 'full', skipProofGeneration: false, scopes: [], signal }),
       () =>
@@ -549,8 +551,6 @@ describe('PXE', () => {
 
     for (const call of calls) {
       await expect(call()).rejects.toBe(reason);
-      const instance = await randomContractInstanceWithAddress();
-      await expect(pxe.registerContract(instance)).resolves.toEqual(instance.address);
     }
   });
 

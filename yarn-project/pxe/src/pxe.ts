@@ -153,6 +153,8 @@ export type SimulateTxOpts = {
   scopes: AztecAddress[];
   /** Sender address used to derive discovery tags for private messages (notes, events, logs) this tx emits. */
   senderForTags?: AztecAddress;
+  /** Aborts the call, as {@link ProveTxOpts.signal} does. */
+  signal?: AbortSignal;
 };
 
 /** Options for PXE.simulateAndProveTx. */
@@ -160,16 +162,11 @@ export type SimulateAndProveTxOpts = SimulateTxOpts & {
   /**
    * Returns the request to prove and its options, given the simulation's result. Runs inside the operation: other PXE
    * operations wait for it to return, and it must not call the PXE itself, since that call would wait for this
-   * operation to end. A `signal` among the returned options is ignored: the operation's own `signal` governs it.
+   * operation to end.
    */
   prepareProve: (
     simulationResult: TxSimulationResult,
   ) => Promise<{ proveTxRequest: TxExecutionRequest; proveOpts: Omit<ProveTxOpts, 'signal'> }>;
-  /**
-   * Interrupts the whole sequence when it aborts, as {@link ProveTxOpts.signal} does. Once it has aborted, the public
-   * simulation and the validity check are not sent to the node, and no proof starts.
-   */
-  signal?: AbortSignal;
 };
 
 /** Options for PXE.executeUtility. */
@@ -1347,6 +1344,7 @@ export class PXE {
     // delete the same read value, or reading values that another simulation is currently modifying).
     return this.operationQueue.runSynced(ctx => this.#simulateTx(ctx, txRequest, opts), {
       errorContext: () => this.#simulateTxErrorContext(txRequest, opts),
+      signal: opts.signal,
     });
   }
 
