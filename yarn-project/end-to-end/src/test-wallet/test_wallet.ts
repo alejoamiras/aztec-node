@@ -41,6 +41,7 @@ import {
   SimulationOverrides,
   type TxExecutionRequest,
   type TxHash,
+  type TxProvingResult,
   type TxReceipt,
 } from '@aztec-labs/stdlib/tx';
 import { ExecutionPayload, mergeExecutionPayloads } from '@aztec-labs/stdlib/tx';
@@ -71,6 +72,9 @@ export interface AccountData {
  * Spartan tests run against remote JSON-RPC nodes and restore the 1s default via setDefaultWaitInterval.
  */
 export const IN_PROCESS_WAIT_INTERVAL_SECONDS = 0.25;
+
+/** Options for {@link TestWallet.proveTx}: send options without waiting, plus a signal that aborts the proof. */
+type ProveTxOptions = Omit<SendOptions, 'wait'> & { signal?: AbortSignal };
 
 export class TestWallet extends BaseWallet {
   constructor(
@@ -383,17 +387,56 @@ export class TestWallet extends BaseWallet {
     return TxSimulationResultWithAppOffset.fromResultAndOffset(result, appCallOffset);
   }
 
-  async proveTx(exec: ExecutionPayload, opts: Omit<SendOptions, 'wait'>): Promise<ProvenTx> {
+  /** Proves `exec` without sending it. `signal` aborts the proof as `PXE.proveTx` documents. */
+  async proveTx(exec: ExecutionPayload, opts: ProveTxOptions): Promise<ProvenTx> {
+    return (await this.prepareProveTx(exec, opts))();
+  }
+
+  /**
+   * Builds the request that {@link proveTx} proves and returns a function that proves it. Building it runs PXE
+   * operations of its own; calling the function enqueues only the proving operation, synchronously.
+   */
+  async prepareProveTx(exec: ExecutionPayload, opts: ProveTxOptions): Promise<() => Promise<ProvenTx>> {
+    const { txRequest, proveOpts } = await this.createProvableRequest(exec, opts);
+    return async () => this.toProvenTx(await this.pxe.proveTx(txRequest, { ...proveOpts, signal: opts.signal }));
+  }
+
+  /**
+   * Simulates `exec`, then proves the same request, in one PXE operation (`PXE.simulateAndProveTx`). `onSimulated` runs
+   * between the two, inside the operation.
+   */
+  async simulateAndProveTx(
+    exec: ExecutionPayload,
+    opts: ProveTxOptions & { onSimulated?: () => void },
+  ): Promise<ProvenTx> {
+    const { txRequest, proveOpts } = await this.createProvableRequest(exec, opts);
+    const txProvingResult = await this.pxe.simulateAndProveTx(txRequest, {
+      simulatePublic: true,
+      ...proveOpts,
+      signal: opts.signal,
+      prepareProve: () => {
+        opts.onSimulated?.();
+        return Promise.resolve({ proveTxRequest: txRequest, proveOpts });
+      },
+    });
+    return this.toProvenTx(txProvingResult);
+  }
+
+  private async createProvableRequest(exec: ExecutionPayload, opts: ProveTxOptions) {
     const fee = await this.completeFeeOptions({
       from: opts.from,
       feePayer: exec.feePayer,
       gasSettings: opts.fee?.gasSettings,
     });
     const txRequest = await this.createTxExecutionRequestFromPayloadAndFee(exec, opts.from, fee);
-    const txProvingResult = await this.pxe.proveTx(txRequest, {
+    const proveOpts = {
       scopes: this.scopesFrom(opts.from, opts.additionalScopes ?? [], opts.sendMessagesAs),
       senderForTags: this.senderForTagsFrom(opts.from, opts.sendMessagesAs),
-    });
+    };
+    return { txRequest, proveOpts };
+  }
+
+  private async toProvenTx(txProvingResult: TxProvingResult): Promise<ProvenTx> {
     return new ProvenTx(
       this.aztecNode,
       await txProvingResult.toTx(),

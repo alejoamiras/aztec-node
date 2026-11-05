@@ -505,7 +505,7 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
     const result = await backend.prove(
       executionSteps.map(step => ungzip(serializeWitness(step.witness))),
       executionSteps.map(step => step.vk),
-      { compress: true },
+      { compress: true, signal },
     );
     this.log.info(`Generated ClientIVC proof`, {
       eventName: 'client-ivc-proof-generation',
