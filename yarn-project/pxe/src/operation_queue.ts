@@ -1,4 +1,6 @@
+import { AbortError, causeChain } from '@aztec-labs/foundation/error';
 import type { Logger } from '@aztec-labs/foundation/log';
+import { promiseWithResolvers } from '@aztec-labs/foundation/promise';
 import { SerialQueue } from '@aztec-labs/foundation/queue';
 import { Timer } from '@aztec-labs/foundation/timer';
 import { SimulationError } from '@aztec-labs/stdlib/errors';
@@ -27,6 +29,8 @@ export type SyncedOperationContext = {
   recording: Recording;
   /** The operation's duration so far, including the sync. */
   totalMs: () => number;
+  /** The caller's signal; work checks it at its own checkpoints (see {@link OperationQueue.runSynced}). */
+  signal?: AbortSignal;
 };
 
 /**
@@ -116,14 +120,24 @@ export class OperationQueue {
    * Runs an operation (`fn`) after a sync with the node (skipped when the `autoSync` config flag is disabled, unless
    * `forceSync` is set). If the operation succeeds, then all staged writes are committed. If it rejects, then all
    * staged writes are discarded.
+   *
+   * When `signal` aborts, the call rejects with `signal.reason`. A queued operation is rejected at once and never runs.
+   * A running one stops at its next checkpoint and discards its staged writes; the queue moves on only once its work
+   * has stopped, which includes node requests and contributor work already in flight. A failure other than the abort
+   * keeps its own error, and an abort after the commit has started has no effect.
    */
   public runSynced<T>(
     fn: (ctx: SyncedOperationContext) => Promise<T>,
-    { errorContext, forceSync = false }: { errorContext?: () => string[]; forceSync?: boolean } = {},
+    {
+      errorContext,
+      forceSync = false,
+      signal,
+    }: { errorContext?: () => string[]; forceSync?: boolean; signal?: AbortSignal } = {},
   ): Promise<T> {
-    return this.run(async () => {
+    const job = async (): Promise<T> => {
       const totalTimer = new Timer();
       const recording = this.node.startRecording();
+      let changeSetId: ChangeSetId | undefined;
       try {
         const syncTimer = new Timer();
         if (forceSync || this.autoSync) {
@@ -131,25 +145,62 @@ export class OperationQueue {
         }
         const syncTime = syncTimer.ms();
         const anchorBlockHeader = await this.anchorBlockStore.getBlockHeader();
+        // The reason itself rather than an `AbortError`: nothing between here and the caller rewraps it.
+        signal?.throwIfAborted();
 
-        const changeSetId = this.stagedWriteCoordinator.begin();
+        changeSetId = this.stagedWriteCoordinator.begin();
         this.log.verbose(`Beginning operation ${changeSetId}`, { changeSetId, syncMs: syncTime });
 
         const operationArgs = {
           stagedWriteCoordinator: this.stagedWriteCoordinator,
           contributors: this.contributors,
           changeSetId,
+          signal,
           log: this.log,
         };
-        return await runOperation(operationArgs, () =>
-          fn({ changeSetId, syncTime, anchorBlockHeader, recording, totalMs: () => totalTimer.ms() }),
-        );
+        const ctx = { changeSetId, syncTime, anchorBlockHeader, recording, totalMs: () => totalTimer.ms(), signal };
+        return await runOperation(operationArgs, async () => {
+          try {
+            return await fn(ctx);
+          } catch (err) {
+            // Checkpoints throw a cause-less `AbortError` (see `throwAbortErrorIfAborted`); this is where it becomes
+            // the caller's reason again.
+            throw signal && isAbortOf(err, signal) ? signal.reason : err;
+          }
+        });
       } catch (err: any) {
+        if (signal?.aborted && Object.is(err, signal.reason)) {
+          this.log.verbose('PXE operation aborted by caller', {
+            eventName: 'pxe_operation_aborted',
+            changeSetId,
+          });
+          throw err;
+        }
         throw errorContext ? this.#contextualizeError(err, ...errorContext()) : err;
       } finally {
         recording.stop();
       }
-    });
+    };
+
+    if (!signal) {
+      return this.run(job);
+    }
+    if (signal.aborted) {
+      return Promise.reject(signal.reason);
+    }
+    const caller = promiseWithResolvers<T>();
+    const rejectQueued = () => caller.reject(signal.reason);
+    signal.addEventListener('abort', rejectQueued, { once: true });
+    this.run(() => {
+      // Removed before any await: once the work runs, an abort must stop it at a checkpoint rather than reject the
+      // caller while the work still holds the queue.
+      signal.removeEventListener('abort', rejectQueued);
+      // Aborted while queued: the caller is already rejected, so the operation must not start.
+      return signal.aborted ? Promise.reject(signal.reason) : job();
+    })
+      .then(caller.resolve, caller.reject)
+      .finally(() => signal.removeEventListener('abort', rejectQueued));
+    return caller.promise;
   }
 
   #contextualizeError(err: Error, ...context: string[]): Error {
@@ -165,6 +216,15 @@ export class OperationQueue {
     }
     return err;
   }
+}
+
+/**
+ * Whether `err` means the work stopped because `signal` aborted: its cause chain holds the signal's reason or an
+ * `AbortError`. An unrelated `AbortError` seen while aborted counts too; relabelling it costs nothing, since the
+ * operation's writes are discarded either way.
+ */
+function isAbortOf(err: unknown, signal: AbortSignal): boolean {
+  return signal.aborted && causeChain(err).some(c => Object.is(c, signal.reason) || c instanceof AbortError);
 }
 
 /** Dependencies of the {@link OperationQueue}. */

@@ -9,6 +9,7 @@ import {
   VK_TREE_HEIGHT,
 } from '@aztec-labs/constants';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
+import { AbortError } from '@aztec-labs/foundation/error';
 import { createLogger } from '@aztec-labs/foundation/log';
 import { MembershipWitness } from '@aztec-labs/foundation/trees';
 import { FunctionSelector } from '@aztec-labs/stdlib/abi';
@@ -125,7 +126,13 @@ describe('Private Kernel Sequencer', () => {
     bytecode: Buffer.from([]),
   });
 
-  const prove = (executionResult: PrivateExecutionResult) => prover.proveWithKernels(txRequest, executionResult);
+  const prove = (executionResult: PrivateExecutionResult, signal?: AbortSignal) =>
+    prover.proveWithKernels(txRequest, executionResult, {
+      simulate: false,
+      skipFeeEnforcement: false,
+      profileMode: 'none',
+      signal,
+    });
 
   beforeEach(async () => {
     txRequest = makeTxRequest();
@@ -522,5 +529,44 @@ describe('Private Kernel Sequencer', () => {
     expect(inputsProvider.getUpdatedClassIdHints).toHaveBeenCalledTimes(2);
     expect(inputsProvider.getUpdatedClassIdHints).toHaveBeenCalledWith(contractAddress);
     expect(inputsProvider.getUpdatedClassIdHints).toHaveBeenCalledWith(contractAddressB);
+  });
+
+  it('runs no further circuit once the signal aborts during a kernel circuit', async () => {
+    // Six apps: init_5 takes a..e, so an inner kernel would still have to run for f.
+    dependencies = { a: ['b', 'c', 'd', 'e', 'f'] };
+    const controller = new AbortController();
+    const circuitsRun: string[] = [];
+    proofCreator.simulateInit5.mockImplementation(() => {
+      circuitsRun.push('init_5');
+      controller.abort();
+      return Promise.resolve(simulateProofOutput());
+    });
+    proofCreator.simulateInner.mockImplementation(() => {
+      circuitsRun.push('inner');
+      return Promise.resolve(simulateProofOutput());
+    });
+    proofCreator.simulateResetTail.mockImplementation(() => {
+      circuitsRun.push('reset_tail');
+      return Promise.resolve(simulateProofOutputFinal());
+    });
+
+    await expect(prove(createExecutionResult('a'), controller.signal)).rejects.toThrow(AbortError);
+    expect(circuitsRun).toEqual(['init_5']);
+  });
+
+  it('rejects with what the proof creator rejects with once the signal aborts mid-proof', async () => {
+    prover = new PrivateKernelExecutionProver(inputsProvider, proofCreator, { fakeProofs: false });
+    proofCreator.generateInitOutput.mockResolvedValue(simulateProofOutput());
+    proofCreator.generateResetTailOutput.mockResolvedValue(simulateProofOutputFinal());
+    proofCreator.generateHidingToRollupOutput.mockResolvedValue(simulateProofOutputFinal());
+    const controller = new AbortController();
+    const reason = new Error('cancelled by the wallet');
+    proofCreator.createChonkProof.mockImplementation((_steps, signal) => {
+      controller.abort(reason);
+      return Promise.reject(signal?.aborted ? signal.reason : new Error('signal not forwarded'));
+    });
+
+    dependencies = { a: [] };
+    await expect(prove(createExecutionResult('a'), controller.signal)).rejects.toBe(reason);
   });
 });

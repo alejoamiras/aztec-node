@@ -3,6 +3,7 @@ import { CircuitKind } from '@aztec-foundation/bb.js';
 import { MAX_APPS_PER_KERNEL } from '@aztec-labs/constants';
 import { vkAsFields } from '@aztec-labs/foundation/crypto/keys';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { type Logger, type LoggerBindings, createLogger } from '@aztec-labs/foundation/log';
 import { pushTestData } from '@aztec-labs/foundation/testing';
 import { Timer } from '@aztec-labs/foundation/timer';
@@ -66,6 +67,8 @@ export interface PrivateKernelExecutionProverConfig {
   simulate: boolean;
   skipFeeEnforcement: boolean;
   profileMode: 'gates' | 'execution-steps' | 'full' | 'none';
+  /** Checked before every circuit and passed to the proof creator; the call rejects once the work has stopped. */
+  signal?: AbortSignal;
 }
 
 /** Optional settings of a {@link PrivateKernelExecutionProver}. */
@@ -115,18 +118,20 @@ export class PrivateKernelExecutionProver {
    *
    * @param txRequest - The authenticated transaction request object.
    * @param executionResult - The execution result object containing nested executions and preimages.
-   * @param profile - Set true to profile the gate count for each circuit
+   * @param config - Simulation, fee enforcement and profiling settings, and the abort signal.
    * @returns A Promise that resolves to a KernelProverOutput object containing proof, public inputs, and output notes.
    */
   async proveWithKernels(
     txRequest: TxRequest,
     executionResult: PrivateExecutionResult,
-    { simulate, skipFeeEnforcement, profileMode }: PrivateKernelExecutionProverConfig = {
+    { simulate, skipFeeEnforcement, profileMode, signal }: PrivateKernelExecutionProverConfig = {
       simulate: false,
       skipFeeEnforcement: false,
       profileMode: 'none',
     },
   ): Promise<PrivateKernelExecutionProofOutput<PrivateKernelTailCircuitPublicInputs>> {
+    throwAbortErrorIfAborted(signal);
+
     const skipProofGeneration = this.fakeProofs || simulate;
     const generateWitnesses = !skipProofGeneration || profileMode !== 'none';
 
@@ -168,6 +173,7 @@ export class PrivateKernelExecutionProver {
           // Inner reset: without siloing.
           const witgenTimer = new Timer();
           const privateInputs = await resetBuilder.build(this.inputsProvider, PaddedSideEffectAmounts.empty());
+          throwAbortErrorIfAborted(signal);
           output = generateWitnesses
             ? await this.proofCreator.generateResetOutput(privateInputs)
             : await this.proofCreator.simulateReset(privateInputs);
@@ -205,6 +211,7 @@ export class PrivateKernelExecutionProver {
         minRevertibleSideEffectCounter,
         executionSteps,
         generateWitnesses,
+        signal,
       });
 
       firstIteration = false;
@@ -254,6 +261,7 @@ export class PrivateKernelExecutionProver {
       `Calling terminal private kernel reset+tail (${mergedInputs.isForPublic() ? 'to-public' : 'to-rollup'}) with hwm ${output.publicInputs.minRevertibleSideEffectCounter}`,
     );
 
+    throwAbortErrorIfAborted(signal);
     const witgenTimer = new Timer();
     const tailOutput = generateWitnesses
       ? await this.proofCreator.generateResetTailOutput(mergedInputs)
@@ -275,6 +283,7 @@ export class PrivateKernelExecutionProver {
     if (generateWitnesses) {
       const previousKernelVkData = await this.getVkData(tailOutput.verificationKey);
 
+      throwAbortErrorIfAborted(signal);
       const witgenTimer = new Timer();
       let hidingOutput: PrivateKernelSimulateOutput<PrivateKernelTailCircuitPublicInputs>;
       if (tailOutput.publicInputs.forPublic) {
@@ -305,6 +314,7 @@ export class PrivateKernelExecutionProver {
 
     if (profileMode == 'gates' || profileMode == 'full') {
       for (const entry of executionSteps) {
+        throwAbortErrorIfAborted(signal);
         const gateCountTimer = new Timer();
         const gateCount = await this.proofCreator.computeGateCountForCircuit(
           entry.bytecode,
@@ -331,8 +341,9 @@ export class PrivateKernelExecutionProver {
     // TODO(#7368) how do we 'bincode' encode these inputs?
     let provingTime;
     if (!skipProofGeneration) {
+      throwAbortErrorIfAborted(signal);
       const provingTimer = new Timer();
-      const proofWithPublicInputs = await this.proofCreator.createChonkProof(executionSteps);
+      const proofWithPublicInputs = await this.proofCreator.createChonkProof(executionSteps, signal);
       provingTime = provingTimer.ms();
       this.ensurePublicInputsMatch(proofWithPublicInputs, tailOutput.publicInputs);
       chonkProof = proofWithPublicInputs.removePublicInputs();
@@ -464,6 +475,7 @@ export class PrivateKernelExecutionProver {
     minRevertibleSideEffectCounter: number;
     executionSteps: PrivateExecutionStep[];
     generateWitnesses: boolean;
+    signal: AbortSignal | undefined;
   }): Promise<PrivateKernelSimulateOutput<PrivateKernelCircuitPublicInputs>> {
     const {
       apps,
@@ -474,6 +486,7 @@ export class PrivateKernelExecutionProver {
       minRevertibleSideEffectCounter,
       executionSteps,
       generateWitnesses,
+      signal,
     } = args;
 
     const witgenTimer = new Timer();
@@ -481,6 +494,7 @@ export class PrivateKernelExecutionProver {
     let functionName: string;
 
     if (firstIteration) {
+      throwAbortErrorIfAborted(signal);
       const vkTreeRoot = getVKTreeRoot();
       switch (apps.length) {
         case 1: {
@@ -583,6 +597,7 @@ export class PrivateKernelExecutionProver {
       }
     } else {
       const vkData = await this.getVkData(previousOutput.verificationKey);
+      throwAbortErrorIfAborted(signal);
       const previousKernelData = new PrivateKernelData(previousOutput.publicInputs, vkData);
       switch (apps.length) {
         case 1: {

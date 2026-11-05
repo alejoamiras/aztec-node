@@ -3,6 +3,7 @@ import { serializeWitness } from '@aztec-foundation/noir-noirc_abi';
 import type { Abi, WitnessMap } from '@aztec-foundation/noir-types';
 
 import { getEnv } from '@aztec-labs/foundation/config/env';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { type LogLevel, type Logger, createLogger } from '@aztec-labs/foundation/log';
 import { Timer } from '@aztec-labs/foundation/timer';
 import {
@@ -482,13 +483,17 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
     return kernelProofOutput;
   }
 
-  public async createChonkProof(executionSteps: PrivateExecutionStep[]): Promise<ChonkProofWithPublicInputs> {
+  public async createChonkProof(
+    executionSteps: PrivateExecutionStep[],
+    signal?: AbortSignal,
+  ): Promise<ChonkProofWithPublicInputs> {
     const timer = new Timer();
     this.log.info(`Generating ClientIVC proof...`);
     const barretenberg = await Barretenberg.initSingleton({
       ...this.options,
       logger: this.options.logger?.verbose,
     });
+    throwAbortErrorIfAborted(signal);
     const backend = new AztecClientBackend(
       executionSteps.map(step => ungzip(step.bytecode)),
       barretenberg,

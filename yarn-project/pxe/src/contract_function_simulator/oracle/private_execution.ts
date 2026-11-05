@@ -1,5 +1,6 @@
 import { PRIVATE_CIRCUIT_PUBLIC_INPUTS_LENGTH, PRIVATE_CONTEXT_INPUTS_LENGTH } from '@aztec-labs/constants';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
+import { throwAbortErrorIfAborted } from '@aztec-labs/foundation/error';
 import { createLogger } from '@aztec-labs/foundation/log';
 import { Timer } from '@aztec-labs/foundation/timer';
 import {
@@ -42,6 +43,7 @@ export async function executePrivateFunction(
   log = createLogger('simulator:private_execution'),
 ): Promise<PrivateCallExecutionResult> {
   const functionName = await privateExecutionOracle.getDebugFunctionName();
+  throwAbortErrorIfAborted(privateExecutionOracle.signal);
   log.verbose(`Executing private function ${functionName}`, { contract: contractAddress });
   const initialWitness = privateExecutionOracle.getInitialWitness(artifact);
   const timer = new Timer();
