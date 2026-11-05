@@ -67,6 +67,8 @@ export interface PrivateKernelExecutionProverConfig {
   simulate: boolean;
   skipFeeEnforcement: boolean;
   profileMode: 'gates' | 'execution-steps' | 'full' | 'none';
+  /** Checked before every circuit and passed to the proof creator; the call rejects once the work has stopped. */
+  signal?: AbortSignal;
 }
 
 /** Optional settings of a {@link PrivateKernelExecutionProver}. */
@@ -116,20 +118,17 @@ export class PrivateKernelExecutionProver {
    *
    * @param txRequest - The authenticated transaction request object.
    * @param executionResult - The execution result object containing nested executions and preimages.
-   * @param profile - Set true to profile the gate count for each circuit
-   * @param signal - Checked before every circuit and passed to the proof creator. When it aborts, the call rejects
-   * once the work has stopped, with an `AbortError` or with what the proof creator rejected with.
+   * @param config - Simulation, fee enforcement and profiling settings, and the abort signal.
    * @returns A Promise that resolves to a KernelProverOutput object containing proof, public inputs, and output notes.
    */
   async proveWithKernels(
     txRequest: TxRequest,
     executionResult: PrivateExecutionResult,
-    { simulate, skipFeeEnforcement, profileMode }: PrivateKernelExecutionProverConfig = {
+    { simulate, skipFeeEnforcement, profileMode, signal }: PrivateKernelExecutionProverConfig = {
       simulate: false,
       skipFeeEnforcement: false,
       profileMode: 'none',
     },
-    signal?: AbortSignal,
   ): Promise<PrivateKernelExecutionProofOutput<PrivateKernelTailCircuitPublicInputs>> {
     throwAbortErrorIfAborted(signal);
 

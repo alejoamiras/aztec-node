@@ -655,7 +655,6 @@ export class PXE {
    * @param proofCreator - The proof creator to use for proving the execution.
    * @param privateExecutionResult - The result of the private execution
    * @param config - The configuration for the kernel execution prover.
-   * @param signal - Interrupts the kernels and the proof; kept out of `config`, which is logged.
    * @returns An object that contains the output of the kernel execution, including the ChonkProof if proving is enabled.
    */
   async #prove(
@@ -664,7 +663,6 @@ export class PXE {
     privateExecutionResult: PrivateExecutionResult,
     anchorBlockHeader: BlockHeader,
     config: PrivateKernelExecutionProverConfig,
-    signal?: AbortSignal,
   ): Promise<PrivateKernelExecutionProofOutput<PrivateKernelTailCircuitPublicInputs>> {
     const kernelInputsProvider = new PrivateKernelInputsProvider(
       this.contractStore,
@@ -679,12 +677,7 @@ export class PXE {
       resolveExpirationAndPadding: this.hooks?.resolveExpirationAndPadding,
     });
     this.log.debug(`Executing kernel trace prover (${JSON.stringify(config)})...`);
-    return await kernelTraceProver.proveWithKernels(
-      txExecutionRequest.toTxRequest(),
-      privateExecutionResult,
-      config,
-      signal,
-    );
+    return await kernelTraceProver.proveWithKernels(txExecutionRequest.toTxRequest(), privateExecutionResult, config);
   }
 
   /** Simulates `txRequest` within an already-open operation, using its anchor block and change set. */
@@ -754,8 +747,8 @@ export class PXE {
           simulate: true,
           skipFeeEnforcement,
           profileMode: 'none',
+          signal,
         },
-        signal,
       ));
     }
 
@@ -851,14 +844,12 @@ export class PXE {
       chonkProof,
       executionSteps,
       timings: { proving } = {},
-    } = await this.#prove(
-      txRequest,
-      this.proofCreator,
-      privateExecutionResult,
-      anchorBlockHeader,
-      { simulate: false, skipFeeEnforcement: false, profileMode: 'none' },
+    } = await this.#prove(txRequest, this.proofCreator, privateExecutionResult, anchorBlockHeader, {
+      simulate: false,
+      skipFeeEnforcement: false,
+      profileMode: 'none',
       signal,
-    );
+    });
 
     const totalTime = totalMs();
 
@@ -1262,7 +1253,8 @@ export class PXE {
   ): Promise<TxProfileResult> {
     // We disable concurrent profiles for consistency with simulateTx.
     return this.operationQueue.runSynced(
-      async ({ changeSetId, syncTime, anchorBlockHeader, recording, totalMs }) => {
+      async ctx => {
+        const { changeSetId, syncTime, anchorBlockHeader, recording, totalMs } = ctx;
         const txInfo = {
           origin: txRequest.origin,
           functionSelector: txRequest.functionSelector,
@@ -1284,7 +1276,7 @@ export class PXE {
           scopes,
           changeSetId,
           senderForTags,
-          signal,
+          signal: ctx.signal,
         });
 
         const { executionSteps, timings: { proving } = {} } = await this.#prove(
@@ -1296,8 +1288,8 @@ export class PXE {
             simulate: skipProofGeneration,
             skipFeeEnforcement: false,
             profileMode,
+            signal: ctx.signal,
           },
-          signal,
         );
 
         const totalTime = totalMs();
