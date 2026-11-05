@@ -23,12 +23,12 @@ export class AbortError extends Error {
 
 /**
  * Throws a fresh {@link AbortError} with no `cause` if `signal` has aborted. Unlike `AbortSignal#throwIfAborted`, it
- * never throws `signal.reason`, so the work it stops never carries a caller-controlled value; a caller that needs the
- * reason maps the error back at its own boundary.
+ * never throws `signal.reason`: code the error crosses may assign its `message`, which a `DOMException` reason forbids,
+ * or walk its `cause` chain. The caller's boundary maps the error back to the reason.
  */
 export function throwAbortErrorIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new AbortError('Interrupted by caller');
+    throw new AbortError('Aborted by caller');
   }
 }
 

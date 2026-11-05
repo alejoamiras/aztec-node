@@ -7,7 +7,7 @@ import { randomInt } from '@aztec-labs/foundation/crypto/random';
 import { sha256ToField } from '@aztec-labs/foundation/crypto/sha256';
 import { Fr } from '@aztec-labs/foundation/curves/bn254';
 import { GrumpkinScalar } from '@aztec-labs/foundation/curves/grumpkin';
-import { AbortError } from '@aztec-labs/foundation/error';
+import { AbortError, causeChain } from '@aztec-labs/foundation/error';
 import { EthAddress } from '@aztec-labs/foundation/eth-address';
 import { type Logger, createLogger } from '@aztec-labs/foundation/log';
 import type { FieldsOf } from '@aztec-labs/foundation/types';
@@ -18,7 +18,7 @@ import { ParentContractArtifact } from '@aztec-labs/noir-test-contracts.js/Paren
 import { PendingNoteHashesContractArtifact } from '@aztec-labs/noir-test-contracts.js/PendingNoteHashes';
 import { StatefulTestContractArtifact } from '@aztec-labs/noir-test-contracts.js/StatefulTest';
 import { TestContractArtifact } from '@aztec-labs/noir-test-contracts.js/Test';
-import { WASMSimulator, traverseCauseChain } from '@aztec-labs/simulator/client';
+import { WASMSimulator } from '@aztec-labs/simulator/client';
 import { HandshakeRegistryArtifact } from '@aztec-labs/standard-contracts/handshake-registry';
 import { STANDARD_HANDSHAKE_REGISTRY_ADDRESS } from '@aztec-labs/standard-contracts/handshake-registry/constants';
 import {
@@ -779,9 +779,7 @@ describe('Private Execution test suite', () => {
         }).catch(err => err);
 
         expect(error).toBeInstanceOf(SimulationError);
-        const causes: Error[] = [];
-        traverseCauseChain(error, cause => causes.push(cause));
-        expect(causes.some(cause => cause instanceof AbortError)).toBe(true);
+        expect(causeChain(error).some(cause => cause instanceof AbortError)).toBe(true);
         expect(circuitsRun).toContain('entry_point');
         expect(circuitsRun).not.toContain('value');
       } finally {
