@@ -76,7 +76,6 @@ import { ungzip } from 'pako';
 export type BBPrivateKernelProverOptions = Omit<BackendOptions, 'logger'> & { logger?: Logger };
 export abstract class BBPrivateKernelProver implements PrivateKernelProver {
   private log: Logger;
-  private warnedNotInterruptible = false;
 
   constructor(
     protected artifactProvider: ArtifactProvider,
@@ -495,12 +494,6 @@ export abstract class BBPrivateKernelProver implements PrivateKernelProver {
       logger: this.options.logger?.verbose,
     });
     throwAbortErrorIfAborted(signal);
-    if (signal && !barretenberg.interruptible && !this.warnedNotInterruptible) {
-      this.warnedNotInterruptible = true;
-      this.log.warn('Proving backend cannot interrupt a running Chonk proof; an abort takes effect between commands', {
-        eventName: 'client-ivc-proof-not-interruptible',
-      });
-    }
     const backend = new AztecClientBackend(
       executionSteps.map(step => ungzip(step.bytecode)),
       barretenberg,
