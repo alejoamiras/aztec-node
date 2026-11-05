@@ -33,6 +33,23 @@ export function throwAbortErrorIfAborted(signal: AbortSignal | undefined): void 
 }
 
 /**
+ * `err` followed by each `cause` below it, outermost first. Follows any object that has a `cause`, and stops at a value
+ * without one or at a value already listed, so a cyclic chain ends.
+ */
+export function causeChain(err: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current = err;
+  while (!chain.includes(current)) {
+    chain.push(current);
+    if (typeof current !== 'object' || current === null || !('cause' in current)) {
+      break;
+    }
+    current = current.cause;
+  }
+  return chain;
+}
+
+/**
  * An error caused by the environment rather than by the request: a process that died or could not be started, or a
  * failed system call. Retrying may succeed. Satisfies {@link isRetryableError}.
  */
